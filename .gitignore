@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs and compiler caches
+/dist/
+/server/dist/
+.vite/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Runtime workspaces and generated artifacts
+/workspace-data/*
+!/workspace-data/.gitkeep
+/server/workspace-data/
+/tmp/
+/uploads/
+/downloads/
+/preset-studio-bridge.zip
+*.pid
+*.pid.lock
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local.pem
+*.local-key.pem
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Tool caches and temporary files
+.cache/
+.eslintcache
+.stylelintcache
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+
+docs/preset-*.json

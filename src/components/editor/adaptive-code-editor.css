@@ -1,0 +1,86 @@
+.adaptive-code-editor {
+  position: relative;
+  min-height: 160px;
+  min-width: 0;
+  overflow: hidden;
+  background: #fbfcfe;
+  color: #2a3548;
+  isolation: isolate;
+}
+
+.adaptive-code-editor > section,
+.adaptive-code-editor > div:not(.adaptive-code-editor__empty) {
+  height: 100%;
+}
+
+.adaptive-code-editor__codemirror,
+.adaptive-code-editor__codemirror .cm-editor {
+  height: 100%;
+  min-height: 0;
+}
+
+.adaptive-code-editor__loading {
+  display: flex;
+  height: 100%;
+  min-height: 160px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.adaptive-code-editor__spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #d9e5f8;
+  border-top-color: #2563eb;
+  border-radius: 999px;
+  animation: adaptive-code-editor-spin 700ms linear infinite;
+}
+
+.adaptive-code-editor__empty {
+  pointer-events: none;
+  position: absolute;
+  z-index: 4;
+  top: 14px;
+  left: 67px;
+  color: #9ca8ba;
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas,
+    monospace;
+  font-size: 13px;
+  line-height: 22px;
+  user-select: none;
+}
+
+.adaptive-code-editor[data-editor="codemirror"] .adaptive-code-editor__empty {
+  left: 56px;
+}
+
+.adaptive-code-editor[data-read-only="true"] {
+  background: #f8fafc;
+}
+
+.adaptive-code-editor__implementation {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes adaptive-code-editor-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .adaptive-code-editor__spinner {
+    animation-duration: 1.8s;
+  }
+}

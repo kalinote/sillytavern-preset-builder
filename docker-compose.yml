@@ -1,0 +1,37 @@
+services:
+  preset-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sillytavern-preset-studio:local
+    restart: unless-stopped
+    user: "${PRESET_STUDIO_UID:-1000}:${PRESET_STUDIO_GID:-1000}"
+    ports:
+      - "${PRESET_STUDIO_BIND:-127.0.0.1}:${PRESET_STUDIO_PORT:-3001}:3001"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3001
+      PRESET_STUDIO_WORKSPACE: /app/workspace-data
+      PRESET_STUDIO_BODY_LIMIT_MIB: ${PRESET_STUDIO_BODY_LIMIT_MIB:-64}
+      PRESET_STUDIO_ZIP_MAX_MIB: ${PRESET_STUDIO_ZIP_MAX_MIB:-64}
+      PRESET_STUDIO_ZIP_UNPACKED_MIB: ${PRESET_STUDIO_ZIP_UNPACKED_MIB:-256}
+      PRESET_STUDIO_ZIP_FILE_MIB: ${PRESET_STUDIO_ZIP_FILE_MIB:-128}
+      PRESET_STUDIO_ZIP_MAX_ENTRIES: ${PRESET_STUDIO_ZIP_MAX_ENTRIES:-10000}
+      PRESET_STUDIO_ALLOWED_ORIGINS: "${PRESET_STUDIO_ALLOWED_ORIGINS:-}"
+      PRESET_STUDIO_EXPOSE_WORKSPACE_PATH: "${PRESET_STUDIO_EXPOSE_WORKSPACE_PATH:-false}"
+    volumes:
+      - ${PRESET_STUDIO_WORKSPACE_HOST:-./workspace-data}:/app/workspace-data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

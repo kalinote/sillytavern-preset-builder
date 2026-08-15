@@ -1,0 +1,1323 @@
+# SillyTavern 预设开发工具实施方案
+
+> 文档状态：第一版需求基线  
+> 编制日期：2026-08-15  
+> 第一版目标 SillyTavern：最新稳定版 release；编制时为 1.18.0  
+> 测试基准文件：[主预设] V18 狐神抚 · 毓忻.json  
+> 产品暂用名：Preset Studio
+
+## 0. 当前实施进度（2026-08-15）
+
+当前版本已经完成可运行的“工程内核 + 真实源码编辑器 + 基础静态预览 + Bridge v1 preset 快照”纵切片，但尚未达到本文定义的完整第一版。
+
+已接通的能力：
+
+- Node 服务端多工程工作区、Chat Completion preset JSON 导入拆分、语义 round-trip 校验、按文件自动保存和 revision 冲突检测。
+- Prompt、Regex、Tavern Helper Script 的拆分源码编辑；样本中的一致 Regex 三镜像识别为一个逻辑源码并在构建时回填。
+- 带 version 与时间戳的 JSON 构建/导出、工程 ZIP 下载与新 ID 导入、`output/` 历史产物。
+- 桌面与常规横屏平板 Monaco、手机与矮横屏设备 CodeMirror 6；大文件模式、按需加载、选择与滚动位置的会话内恢复。
+- HTML/CSS 无脚本静态预览，含 320ms 刷新防抖、桌面/平板/手机画布、缩放、空 sandbox、CSP 和 no-referrer。
+- Dockerfile、Compose、工作区 volume、非 root runtime、healthcheck；API Origin 白名单与健康接口隐私边界。
+- Bridge v1 一次性配对、版本/能力握手、心跳、会话内恢复与连接门禁；配套 ST 1.18.0 UI Extension 不接触 ST 登录会话或 secrets 存储。
+- 从已连接 ST 的当前 Chat Completion preset 手动创建新工程；快照只单向写入新工程，不建立持续同步。
+
+尚未接通的第一版核心能力：
+
+- 角色、聊天、Persona、World Info 一次性只读快照。
+- Prompt 三态、顺序、字段表单和宏分析等结构化工作台。
+- Regex 结构化编辑、顺序测试、逐步 diff、静态诊断和镜像冲突处理 UI。
+- 最终 Prompt/token/裁剪/usage、ST DOM 快照、真实运行入口和 preset 手动推送/应用。
+- PWA manifest、Service Worker 和完整第一版验收。
+
+当前自动验证基线为前后端生产构建通过、服务端 18 项测试通过，Bridge 扩展通过 JavaScript/manifest 静态校验，并可由服务端下载固定白名单安装包。Docker 配置已完成，但仍需在安装 Docker CLI 的环境中执行真实镜像构建与 volume 重启验收；Bridge 扩展仍需安装到真实 ST 1.18.0 完成浏览器运行时联调。
+
+## 1. 文档目的
+
+本文档汇总并固化当前已经确认的全部产品需求、技术边界和实施规则，用作第一版的产品设计、技术设计、开发拆分、联调与验收依据。
+
+本文档中的内容分为三类：
+
+- **已确认需求**：已经由需求方明确确认，第一版必须遵守。
+- **实施默认**：为使需求可以落地而确定的工程实现方式；若后续没有新的变更，开发按本文执行。
+- **第一版非目标**：明确不在第一版实现，避免开发范围膨胀。
+
+## 2. 项目背景
+
+SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导入、导出的 JSON 运行配置。普通作者可以直接在酒馆 UI 中编写 Prompt 并导出 JSON；复杂作者则可能把 Prompt 宏、Regex、HTML/CSS、Tavern Helper JavaScript 和扩展私有数据全部嵌入同一个 JSON。
+
+本项目要解决的问题是：
+
+- 大型 preset JSON 不适合直接人工编辑。
+- Prompt 定义、排列顺序和启用状态分散在不同结构中。
+- Regex replacement 中可能包含大量 HTML/CSS/JavaScript，缺少面向设计和调试的编辑体验。
+- 一个 preset 可能同时包含多份强关联的扩展数据镜像。
+- 最终 Prompt 的装配、宏展开、上下文裁剪和真实前端运行依赖 SillyTavern 本身，独立工具难以完全复刻。
+- 示例 preset 体积约 8.8 MB，并包含两个约 3.29 MB 的大型 Tavern Helper 脚本，需要工程拆分、按文件编辑和大文件优化。
+
+因此，第一版产品定位为：
+
+> 一个必须连接真实 SillyTavern 的、以服务端拆分工程为数据源的 Chat Completion preset 开发 IDE。
+
+## 3. 第一版总体目标
+
+第一版最重要的能力依次为：
+
+1. Prompt 的结构化编辑、排序、启用和静态分析。
+2. 将 preset JSON 拆成可维护的多文件工程，并自动保存工程。
+3. Regex 的结构化编辑、静态测试和 HTML/CSS 设计预览。
+4. 使用真实 SillyTavern 运行时获得最终 Prompt、token 信息和真实前端展示。
+5. 在工具中编辑 Tavern Helper 等 JavaScript 源码，但只在真实 ST 中执行。
+6. 从真实 ST 单向拉取当前 preset、角色、聊天、Persona 和 World Info 快照。
+7. 将工具中的 preset 工程手动构建、校验、导出，或手动推送到真实 ST。
+8. 提供蓝白主题、现代化、适配桌面、平板和手机的 Web/PWA 界面。
+
+## 4. 已确认的核心原则
+
+### 4.1 工程是唯一编辑源
+
+- 导入的 preset JSON 只用于创建工程。
+- 日常编辑只修改拆分工程中的文件。
+- 编辑过程中不持续修改原始 JSON。
+- 最终 JSON 仅在导出或推送到 ST 时构建。
+- 自动保存永远只写工程文件，不会自动写入 ST。
+
+### 4.2 工作区位于服务器
+
+- 所有平台均不使用浏览器本地文件夹持续写回。
+- 工程统一保存在 Node/Docker 服务端工作区。
+- Docker 工作区通过 bind mount 或 named volume 持久化。
+- 浏览器通过上传、下载和服务端 API 管理工程。
+- 不依赖 showDirectoryPicker、OPFS 或客户端本地工程目录。
+
+### 4.3 必须连接真实 ST
+
+- 第一版使用工具前必须连接一个已经运行的 SillyTavern。
+- 第一版不内置或额外启动 SillyTavern 容器。
+- 连接目标是用户已有的最新稳定版 ST。
+- 未连接 ST 时只显示连接入口，不开放完整工程编辑和调试界面。
+- ST 负责所有动态运行逻辑；工具不实现完整的 ST Prompt/运行时模拟器。
+
+### 4.4 只有 preset 可以写回 ST
+
+- preset 工程可以保存、导出 JSON，并手动推送到真实 ST。
+- 角色、聊天、Persona、World Info 只允许从 ST 单向拉取。
+- 这些上下文快照在工具中为只读数据。
+- 第一版不把角色、聊天、Persona 或 World Info 从工具写回 ST。
+- 第一版不做持续同步、双向同步或冲突合并。
+
+### 4.5 动态执行交给 ST
+
+- 项目 JavaScript 只在真实 SillyTavern 中执行。
+- 工具不执行 Tavern Helper、inline handler 或其他项目脚本。
+- 工具只提供 HTML/CSS 和无 JavaScript 原生交互的静态预览。
+- JavaScript 驱动的按钮、粒子、动态面板、网络、存储和 ST API 行为，必须进入真实 ST 查看。
+
+## 5. 第一版范围
+
+### 5.1 支持的 preset 类型
+
+第一版只支持：
+
+- SillyTavern Chat Completion preset。
+- 以示例 preset 为基准的 prompts、prompt_order 和 extensions 结构。
+- 示例中出现的 Regex、SPreset、Tavern Helper 数据。
+
+第一版不支持：
+
+- Text Completion preset。
+- Kobold preset。
+- NovelAI preset。
+- Instruct、Context、Reasoning 等独立模板格式。
+- 其他与样本结构无关的 preset 类型。
+
+### 5.2 支持的工程来源
+
+第一版支持以下方式创建或打开工程：
+
+1. 从真实 ST 当前 Chat Completion preset 创建新工程。
+2. 上传 Chat Completion preset JSON 创建新工程。
+3. 上传 Preset Studio 工程压缩包恢复工程。
+4. 在已连接 ST 的前提下创建空白 Chat Completion preset 工程。
+5. 打开服务器工作区中已有的工程。
+
+### 5.3 支持的工程输出
+
+第一版支持：
+
+- 自动保存拆分工程到 Docker 工作区。
+- 下载完整工程压缩包。
+- 构建并下载标准 preset JSON。
+- 将构建后的 preset 手动推送到 ST。
+- 将导出的 JSON 同时保存到工程的 output 目录。
+
+## 6. 第一版非目标
+
+第一版明确不实现：
+
+- 浏览器本地工程目录持续读写。
+- 离线编辑模式。
+- 多用户、账号、登录、权限和租户系统。
+- 工具侧 ST 用户名或密码保存。
+- 工具侧 LLM API Key、提供商或模型配置。
+- 工具侧 OpenAI-compatible 请求客户端或中继。
+- 完整复刻 SillyTavern 的宏、World Info、token 裁剪和动态运行时。
+- 工具内项目 JavaScript 执行。
+- 角色卡 JSON/PNG 上传。
+- 聊天 JSONL 上传。
+- World Info JSON 上传。
+- 手工 Persona 输入。
+- 角色、聊天、Persona、World Info 写回 ST。
+- 双向实时同步和同步冲突解决。
+- Git 或其他版本管理。
+- 同时打开多个 preset 工程组成 multi-root 工作区。
+- 暗色主题。
+- 国际化。
+- 第一版专项无障碍适配。
+- 对旧版 ST 或 staging 分支的兼容承诺。
+
+## 7. 总体系统架构
+
+### 7.1 组件
+
+系统由三个主要部分组成：
+
+1. **Preset Studio Web/PWA**
+   - 提供编辑器、项目管理、静态预览和调试结果 UI。
+   - 桌面与横屏平板使用 Monaco。
+   - 手机使用 CodeMirror 6。
+
+2. **Preset Studio Node 服务**
+   - 保存拆分工程。
+   - 提供项目、文件、导入、导出和构建 API。
+   - 提供桥接 WebSocket。
+   - 不保存 ST 登录凭据。
+   - 不保存或使用 LLM API Key。
+
+3. **SillyTavern Bridge UI Extension**
+   - 安装在用户已有的 ST 中。
+   - 复用当前已登录的 ST 浏览器页面会话。
+   - 读取 ST 当前上下文。
+   - 捕获最终 Prompt、token、生成状态和渲染结果。
+   - 将工具构建的 preset 手动保存或应用到 ST。
+
+### 7.2 逻辑架构
+
+~~~mermaid
+flowchart LR
+    U[浏览器用户] --> W[Preset Studio Web/PWA]
+    W <--> N[Preset Studio Node 服务]
+    N --> V[(Docker 持久化工作区)]
+
+    U --> SUI[已有 SillyTavern 页面]
+    SUI --> B[Preset Studio Bridge 扩展]
+    B <--> N
+
+    SUI --> SS[SillyTavern Server]
+    SS --> LLM[ST 当前配置的 LLM 提供商]
+
+    B -->|单向拉取| N
+    N -->|仅手动推送 preset| B
+~~~
+
+### 7.3 运行职责
+
+| 能力 | 工具 | SillyTavern |
+|---|---:|---:|
+| 工程拆分和保存 | 是 | 否 |
+| Prompt/Regex/脚本编辑 | 是 | 否 |
+| 静态 HTML/CSS 预览 | 是 | 否 |
+| 项目 JavaScript 执行 | 否 | 是 |
+| 宏展开和变量运行 | 否 | 是 |
+| World Info 激活 | 否 | 是 |
+| token 预算和上下文裁剪 | 否 | 是 |
+| LLM API Key 与生成请求 | 否 | 是 |
+| 真实 Regex/Markdown/DOM 渲染 | 否 | 是 |
+| preset 手动推送 | 发起 | 执行 |
+| 角色/聊天/Persona/WI 快照 | 保存只读副本 | 提供来源 |
+
+## 8. 技术实现基线
+
+以下为满足已确认需求的实施默认。
+
+### 8.1 前端
+
+- React。
+- TypeScript。
+- Vite。
+- PWA 应用壳。
+- Tailwind CSS。
+- 可配合无样式或 headless 组件库构建表单、弹窗、抽屉和菜单。
+- 桌面/平板代码编辑器：Monaco Editor。
+- 手机代码编辑器：CodeMirror 6。
+- 大文件解析、token 静态分析、JSON 构建和 Regex 测试优先放入 Web Worker。
+
+### 8.2 服务端
+
+- Node.js。
+- TypeScript。
+- npm 管理依赖。
+- HTTP REST API + WebSocket Bridge。
+- 文件系统作为第一版工程存储。
+- 不引入数据库作为第一版必要依赖。
+
+### 8.3 部署
+
+- Dockerfile。
+- docker-compose.yml。
+- 单个 Preset Studio 服务。
+- 工作区挂载到固定数据目录，例如 /app/data。
+- 推荐宿主机映射：
+
+~~~yaml
+services:
+  preset-studio:
+    volumes:
+      - ./data:/app/data
+~~~
+
+- 远程或跨设备访问时使用 HTTPS/WSS。
+- 因第一版无鉴权，部署定位为 localhost、可信局域网或 VPN；不支持直接暴露公网。
+
+## 9. ST 连接与桥接
+
+### 9.1 连接原则
+
+- 工具不要求输入 ST 用户名和密码。
+- 用户先在 ST 页面正常完成登录。
+- Bridge 扩展运行在该已登录页面中。
+- Bridge 使用当前页面现有 session 和 SillyTavern.getContext()。
+- Bridge 主动连接 Preset Studio Node 的 WebSocket。
+- ST 登录失效时，由用户在 ST 页面重新登录；工具不介入。
+
+### 9.2 连接流程
+
+1. 用户启动 Preset Studio。
+2. 工具显示连接页面和连接码。
+3. 用户打开已经登录的 ST。
+4. ST Bridge 扩展输入或发现 Preset Studio 地址。
+5. Bridge 携带连接码建立 WebSocket。
+6. Bridge 上报 ST 版本、能力和当前上下文摘要。
+7. Node 将连接绑定到当前浏览器会话。
+8. 前端进入项目工作台。
+
+连接码只用于关联调试会话，不是用户认证系统。
+
+### 9.3 版本握手
+
+第一版目标为编制时最新稳定版 ST 1.18.0。
+
+Bridge 建立连接时至少上报：
+
+- ST 版本。
+- release/staging 分支标识，如可获得。
+- Bridge 版本。
+- Prompt 捕获能力。
+- preset 读取/保存能力。
+- 角色、聊天、Persona、World Info 读取能力。
+- DOM 快照能力。
+
+处理规则：
+
+- 目标版本匹配：正常连接。
+- 比目标版本更新：提示“未经验证”，允许进入兼容尝试模式。
+- 比目标版本更旧：提示升级，默认不进入完整调试。
+- staging：显示不受支持提示。
+
+### 9.4 连接状态
+
+工作台应持续显示：
+
+- 已连接/断线/重连中。
+- ST 地址或实例标签。
+- ST 版本。
+- 当前角色。
+- 当前聊天。
+- 当前 Persona。
+- 当前 Chat Completion preset。
+
+断线后：
+
+- 停止所有新的 ST 操作。
+- 中止等待中的调试任务。
+- 保留已经写入服务端的工程内容。
+- 返回连接恢复界面。
+
+### 9.5 Bridge 消息类别
+
+第一版 Bridge 协议至少包含：
+
+- hello：版本和能力握手。
+- heartbeat：连接保活。
+- context.summary：当前 ST 上下文摘要。
+- preset.pull：读取当前 Chat Completion preset。
+- preset.push：手动保存或更新 preset。
+- preset.activate：激活指定 preset。
+- snapshot.pull：拉取当前只读上下文快照。
+- debug.run：使用当前 ST 上下文执行真实测试。
+- debug.prompt：回传最终 Prompt/messages。
+- debug.settings：回传生成设置和 token 信息。
+- debug.rendered：回传渲染后静态 DOM 快照。
+- debug.status：运行状态。
+- debug.error：错误与堆栈摘要。
+
+所有消息都应包含：
+
+- 协议版本。
+- 请求 ID。
+- 会话 ID。
+- 项目 ID，如适用。
+- 时间戳。
+- 成功/失败状态。
+
+## 10. 工程生命周期
+
+### 10.1 从 ST 当前 preset 创建工程
+
+1. 用户连接 ST。
+2. 工具读取当前 Chat Completion preset。
+3. 工具显示来源名称、ST 版本和基本统计。
+4. 用户填写工程名称，可填写或留空工程 version。
+5. Node 创建新的项目 ID 和工作区目录。
+6. 导入器拆分 preset。
+7. 写入来源信息和源数据哈希。
+8. 打开工程编辑页面。
+
+拉取动作只发生一次；工程创建后不会自动跟随 ST preset 变化。
+
+### 10.2 从 JSON 创建工程
+
+1. 用户上传 preset JSON。
+2. Node 校验 JSON 和基本 Chat Completion preset 结构。
+3. 用户填写工程名称和可选 version。
+4. Node 创建工程并拆分。
+5. 工程来源记录为 uploaded-json。
+
+### 10.3 创建空白工程
+
+- 仅在已连接 ST 时开放。
+- 创建最小可用 Chat Completion preset。
+- 自动生成工程 manifest 和必要目录。
+- 不自动推送到 ST。
+
+### 10.4 上传和下载工程
+
+- 工程上传格式为 ZIP 压缩包。
+- ZIP 根目录必须包含 project.json。
+- 服务端解压时拒绝绝对路径、父目录跳转和符号链接逃逸。
+- 工程下载时由服务端即时打包。
+- 下载工程包含源码、只读快照、输出文件和 manifest。工具不访问 ST 登录 Cookie、登录密码、CSRF Token 或 secrets/API Key 存储；但完整 preset 自身可能保存 `proxy_password`、`reverse_proxy`、自定义请求头等连接字段，这些字段会随语义无损工程进入 ZIP 与导出 JSON，必须按敏感配置管理。
+
+### 10.5 工程打开规则
+
+- 服务端可以保存多个工程目录。
+- 单个编辑器会话一次只打开一个工程。
+- 一个工程只对应一个 preset JSON 的拆分结果。
+- 一个工程内部可包含多个 Prompt、Regex 和脚本文件。
+
+## 11. 工程目录格式
+
+建议第一版工程结构如下：
+
+~~~text
+project-root/
+├─ project.json
+├─ preset.base.json
+├─ prompts/
+│  ├─ index.json
+│  ├─ prompt-order.json
+│  └─ <prompt-uid>/
+│     ├─ meta.json
+│     └─ content.md
+├─ regex/
+│  ├─ index.json
+│  └─ <regex-uuid>/
+│     ├─ meta.json
+│     ├─ find.txt
+│     └─ replace.html
+├─ scripts/
+│  ├─ index.json
+│  └─ <script-uid>/
+│     ├─ meta.json
+│     └─ content.js
+├─ snapshots/
+│  └─ <snapshot-id>/
+│     ├─ snapshot.json
+│     ├─ character.json
+│     ├─ chat.jsonl
+│     ├─ persona.json
+│     └─ world-info/
+├─ recovery/
+└─ output/
+~~~
+
+### 11.1 project.json
+
+至少包含：
+
+- 工程 schema 版本。
+- 工程 ID。
+- 工程名称。
+- 可选 version。
+- 创建和更新时间。
+- 来源类型：ST、JSON、空白或工程包。
+- 来源 ST 版本。
+- 来源 preset 名称。
+- 当前映射的 ST 目标 preset 名称。
+- 原始 JSON 内容哈希。
+- 构建规则版本。
+- Regex 镜像绑定信息。
+- 未知字段保留策略。
+
+### 11.2 preset.base.json
+
+- 保存未被专用编辑器拆出的顶层数据和未知扩展数据。
+- 构建时以它作为基础对象。
+- 工具只替换明确由工程管理的路径。
+- 未知字段不得因为导入、编辑或构建而消失。
+
+### 11.3 文件命名
+
+- 不直接使用 Prompt name 或 identifier 作为真实文件名。
+- 使用内部稳定 UID 或原始 UUID。
+- 避免 Windows 保留名、非法字符、大小写冲突和路径过长。
+- 显示名称保存在 meta.json 和 index.json 中。
+
+## 12. 语义无损规则
+
+第一版只要求 JSON 语义无损，不要求：
+
+- 字节一致。
+- 原缩进一致。
+- 属性顺序一致。
+- 原始空白一致。
+
+必须保证：
+
+- 所有已知和未知字段的值保留。
+- false、0、null、空字符串、空数组和空对象不被误删。
+- 字符串换行和转义语义正确。
+- 未修改工程执行“导入 → 构建”后，与源 JSON 深度语义相等。
+- 示例 preset 必须成为 golden round-trip 测试。
+
+## 13. 自动保存与一致性
+
+### 13.1 自动保存范围
+
+自动保存只写服务端工程文件，不会：
+
+- 导出 JSON。
+- 推送 ST。
+- 修改 ST 当前 preset。
+- 修改任何 ST 上下文数据。
+
+### 13.2 自动保存时机
+
+- 用户输入立即更新前端内存状态。
+- 500～1000ms 防抖后写入发生变化的小文件。
+- 编辑器失焦时强制 flush。
+- 切换文件时强制 flush。
+- 切换工程时强制 flush。
+- 导出 JSON 前强制 flush。
+- 推送 ST 前强制 flush。
+
+### 13.3 写入一致性
+
+- 同一工程使用串行写入队列。
+- 每个文件保存 revision/hash。
+- 使用临时文件加原子 rename。
+- manifest/index 最后提交。
+- 多标签页打开同一工程时使用项目写锁或租约，避免 last-writer-wins。
+- recovery 目录只用于崩溃恢复，不作为用户版本管理功能。
+
+## 14. Prompt 数据模型与编辑器
+
+### 14.1 Prompt 三种状态
+
+工具必须区分：
+
+1. **定义存在**：对象存在于 prompts。
+2. **已插入顺序**：identifier 存在于 prompt_order 的 order 中。
+3. **已启用**：order 项或兼容字段标记为 enabled。
+
+这三种状态不能合并为一个开关。
+
+示例 preset 中：
+
+- prompts 共 217 项。
+- prompt_order 中有 212 项。
+- 有 5 个 Prompt 定义不在 order 中。
+- 其中仍有定义级 enabled 为 true 的对象。
+- 8 个 marker 没有 content，这是合法结构。
+
+### 14.2 Prompt 编辑能力
+
+第一版至少支持：
+
+- Prompt 列表、搜索和过滤。
+- 按 order 显示。
+- 拖拽排序。
+- 添加 Prompt。
+- 删除 Prompt。
+- 插入到 order。
+- 从 order 移除但保留定义。
+- 启用和禁用。
+- 编辑 name、identifier、role。
+- 编辑 marker、system_prompt。
+- 编辑 injection_position、injection_depth、injection_order、injection_trigger。
+- 编辑 forbid_overrides。
+- 编辑未知元字段的 JSON 高级视图。
+- 编辑 Prompt 内容。
+- 复制 Prompt。
+- UUID/稳定 ID 生成。
+
+### 14.3 Marker
+
+marker 是由 ST 在最终 Prompt 构建时填入角色信息、聊天历史、World Info 等数据的插槽。工具应：
+
+- 在列表中使用不同图标和样式显示 marker。
+- 允许无 content。
+- 不把空 content 判定为错误。
+- 在真实 ST 调试结果中显示 marker 最终展开位置。
+
+### 14.4 宏静态分析
+
+工具可静态识别并展示：
+
+- user、char 等基础宏。
+- setvar、getvar 等变量宏。
+- 变量定义和引用关系。
+- 未定义引用。
+- 定义但未读取的变量。
+- 常见宏格式错误。
+
+宏静态分析只用于辅助编辑；真实展开结果以 ST 为准。
+
+## 15. 最终 Prompt 调试
+
+最终 Prompt 调试不由工具模拟，必须使用真实 ST。
+
+调试流程：
+
+1. 工具 flush 当前工程。
+2. 在内存中构建并校验 preset JSON。
+3. 用户手动将当前工程推送或应用到 ST。
+4. ST 使用当前角色、聊天、Persona、World Info 和连接配置执行生成。
+5. Bridge 捕获 ST 构建完成的 messages。
+6. Bridge 回传 token、生成设置、运行状态和错误。
+7. 工具以消息时间线展示 system/user/assistant 内容。
+8. 工具显示每段 Prompt 的来源映射；无法精确映射时标记为 ST 合并结果。
+
+工具展示的“最终 Prompt”是 ST 在后端提供商特定转换前构建完成的消息集合。最终上游 HTTP body 由 ST 负责调试，第一版工具不承诺捕获。
+
+## 16. Token 预算
+
+- token 计算由真实 ST 和当前模型配置负责。
+- 工具不自行选择模型 tokenizer。
+- 工具显示 ST 返回的 token 统计、上下文上限、输出预留和裁剪结果。
+- 真实生成完成后，可显示 ST/提供商返回的 usage。
+- 静态编辑视图可提供字符数和近似提示，但不得标记为真实 token。
+
+## 17. Regex 工程模型
+
+### 17.1 Regex 字段
+
+示例 Regex 至少包含：
+
+- id。
+- scriptName。
+- disabled。
+- runOnEdit。
+- findRegex。
+- trimStrings。
+- replaceString。
+- placement。
+- substituteRegex。
+- minDepth。
+- maxDepth。
+- markdownOnly。
+- promptOnly。
+
+### 17.2 Regex 编辑器
+
+第一版至少支持：
+
+- 列表、搜索、过滤和分组。
+- 启用/禁用。
+- 拖拽排序。
+- 新建、复制、删除。
+- 表达式编辑。
+- replacement HTML 编辑。
+- placement/depth/promptOnly/markdownOnly 等字段表单。
+- 原始 JSON 高级编辑。
+- 单条规则测试。
+- 多条规则按顺序测试。
+- 每一步的输入、输出、差异、匹配次数和耗时。
+- 静态错误提示。
+
+本地 Regex 测试是设计辅助工具，不宣称完全等同于 ST 运行结果。真实结果以 ST 为准。
+
+### 17.3 示例 preset 的三份 Regex 镜像
+
+示例中的同一组 40 条 Regex 被完整存储三次：
+
+1. extensions.regex_scripts。
+2. extensions.SPreset.RegexBinding.regexes。
+3. prompts[215].content 中解析后的 RegexBinding.regexes。
+
+第三处 Prompt：
+
+- identifier 为 SPresetSettings。
+- name 为 SPreset配置。
+- 未启用。
+- 不在 prompt_order 中。
+- content 是整个 extensions.SPreset 的精确 JSON 序列化副本。
+
+三组 Regex 的顺序、40 个 UUID 和所有字段完全一致，因此属于一个逻辑集合的三个存储镜像。
+
+### 17.4 Regex 联动规则
+
+- 工程中每个 Regex UUID 只保存一份。
+- project.json 记录三个 mirror target。
+- 编辑逻辑对象时，工程源码只修改一份。
+- 构建时重建 extensions.regex_scripts。
+- 构建时重建 extensions.SPreset.RegexBinding.regexes。
+- 构建时重新序列化整个 extensions.SPreset 并写入 SPresetSettings Prompt content。
+- SPreset 容器级 active、enabled 等状态独立保留。
+
+### 17.5 不允许的自动去重
+
+40 条 Regex 集合内部没有真正重复项。
+
+即使多条规则具有相同 findRegex，它们也可能用于：
+
+- 不同美化皮肤。
+- 隐藏与显示两个阶段。
+- 不同消息深度。
+- promptOnly 与 markdownOnly。
+- 不同 placement。
+
+因此不得根据名称、findRegex 或 replacement 相似度自动合并集合内部规则。
+
+### 17.6 镜像冲突
+
+如果其他 preset 的镜像不一致：
+
+- 不静默覆盖。
+- 显示三方差异。
+- 默认把 extensions.regex_scripts 标记为“建议运行时权威源”。
+- 允许用户选择 A/B/C 来源或拆成独立副本。
+- 缺少镜像时不自动创建，除非该 preset 的兼容规则明确要求。
+
+## 18. HTML/CSS 静态预览
+
+### 18.1 预览目标
+
+工具中的预览用于设计：
+
+- Regex replacement 生成的 HTML 结构。
+- CSS 布局和视觉效果。
+- 桌面、平板和手机尺寸。
+- 蓝白工作台中的独立预览画布。
+- CSS 动画和无 JavaScript 原生交互。
+
+### 18.2 允许的行为
+
+- HTML。
+- CSS。
+- CSS animation/transition。
+- hover、focus、checked 等 CSS 状态。
+- details/summary。
+- 普通表单控件。
+- 静态图片、字体和样式资源，遵循浏览器网络策略。
+
+### 18.3 禁止的行为
+
+工具预览不执行：
+
+- script 标签。
+- inline onclick/onchange 等事件处理器。
+- javascript: URL。
+- Tavern Helper JavaScript。
+- parent/top 访问。
+- SillyTavern.getContext()。
+- 项目网络和存储逻辑。
+
+### 18.4 iframe
+
+- 使用 sandbox iframe。
+- 默认不添加 allow-scripts。
+- 预览辅助控件放在 iframe 外。
+- 如需工具自有的 iframe 辅助代码，必须先移除项目脚本和事件处理器，再只注入工具受控代码。
+- 工具不提供复杂权限模型；这里只负责确保项目 JS 不在工具内执行。
+
+### 18.5 预览标识
+
+工具必须清晰区分：
+
+- **本地设计预览**：HTML/CSS，非 ST 权威结果。
+- **ST 静态快照**：真实 ST 在某个时刻渲染完成的 DOM 副本。
+- **在 ST 中查看**：完整 JavaScript 和真实交互。
+
+## 19. ST 静态 DOM 快照
+
+Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
+
+- 回传最终 HTML。
+- 可回传相关 computed styles 或必要样式引用。
+- 工具在无脚本 iframe 中展示。
+- 工具可与本地设计预览进行差异比较。
+
+快照不保留：
+
+- JavaScript 事件监听器。
+- 定时器。
+- 网络连接。
+- MutationObserver 后续状态。
+- localStorage/IndexedDB 状态。
+- 与 ST 父页面的持续交互。
+
+因此快照只用于查看和比较，完整交互必须在 ST 页面进行。
+
+## 20. JavaScript 编辑
+
+### 20.1 编辑器选择
+
+- 桌面：Monaco Editor。
+- 横屏平板：Monaco Editor。
+- 手机竖屏：CodeMirror 6。
+
+### 20.2 大文件优化
+
+- 编辑器和语言服务懒加载。
+- Monaco worker 独立打包。
+- 启用 largeFileOptimizations。
+- 限制超长单行语法分析。
+- 默认关闭大型脚本 minimap。
+- 大型脚本延迟格式化。
+- 列表使用虚拟滚动。
+- 切换文件时释放不再使用的 model。
+
+### 20.3 执行规则
+
+- 工具只编辑、搜索、格式化和静态检查脚本。
+- 工具不执行项目脚本。
+- 用户点击真实调试时，由 ST 和对应扩展运行。
+- 工具可展示 ST 回传的 Console 和错误摘要。
+
+## 21. 上下文快照
+
+### 21.1 快照来源
+
+全部来自当前连接的 ST：
+
+- 当前角色。
+- 当前聊天。
+- 当前 Persona。
+- 当前角色 World Info。
+- 当前聊天 World Info。
+- 当前 Persona World Info。
+- 当前选中的全局 World Info。
+- 当前 ST 版本和相关源标识。
+
+### 21.2 快照属性
+
+- 单向拉取。
+- 一次性。
+- 只读。
+- 不自动刷新。
+- 不同步回 ST。
+- 不参与冲突合并。
+- 可以创建多个带时间戳的快照。
+
+### 21.3 上下文变化
+
+快照应记录源对象标识和内容哈希。
+
+真实调试前，工具比较：
+
+- 当前角色。
+- 当前聊天。
+- 当前 Persona。
+- 当前 World Info 组合。
+
+如与选中快照不一致，显示“ST 当前上下文已变化”，用户可以：
+
+- 继续使用当前真实上下文运行。
+- 重新拉取一个新快照。
+
+由于第一版禁止把快照写回 ST，旧快照不能被用于恢复旧 ST 上下文。
+
+## 22. Preset 手动推送
+
+### 22.1 推送原则
+
+- 推送永远由用户手动触发。
+- 自动保存不会触发推送。
+- 导出 JSON 不会触发推送。
+- 打开或关闭工程不会触发推送。
+
+### 22.2 推送流程
+
+1. 强制完成工程自动保存。
+2. 构建 preset JSON。
+3. 执行 schema、Prompt 引用、Regex 镜像和 JSON 校验。
+4. 获取目标 ST 当前对应 preset。
+5. 展示差异摘要。
+6. 用户选择保存目标。
+7. 用户明确确认。
+8. Bridge 在 ST 中保存或更新 preset。
+9. 可选将它设为当前激活 preset。
+10. 回传保存结果和 ST 端最终名称。
+
+### 22.3 默认目标
+
+- 从 ST preset 创建的工程，默认映射回来源 preset。
+- 从 JSON 或空白创建的工程，默认目标名为 [Preset Studio] {projectName}。
+- project.json 保存 ST 目标名称。
+- 若目标名称冲突且不是已记录映射，默认创建新名称，不静默覆盖。
+
+### 22.4 推送操作
+
+界面建议提供两个明确动作：
+
+- **推送保存**：保存到 ST，但不切换当前 preset。
+- **推送并应用**：保存后设置为当前 Chat Completion preset。
+
+## 23. JSON 构建与导出
+
+### 23.1 构建过程
+
+1. 读取 preset.base.json。
+2. 深拷贝基础对象。
+3. 重建 prompts。
+4. 重建 prompt_order。
+5. 重建 Regex 逻辑集合及镜像。
+6. 重建 Tavern Helper scripts。
+7. 写回工具明确管理的扩展路径。
+8. 保留未知顶层和扩展字段。
+9. 执行语义无损检查。
+10. 输出格式化 JSON。
+
+### 23.2 导出命名
+
+- version 非空：
+
+~~~text
+{name}-{version}-{YYYYMMDD-HHmmss}.json
+~~~
+
+- version 为空：
+
+~~~text
+{name}-{YYYYMMDD-HHmmss}.json
+~~~
+
+- timestamp 使用文件系统安全格式，不包含冒号。
+
+### 23.3 输出位置
+
+- 写入工程 output 目录。
+- 同时返回浏览器下载。
+- 不覆盖以前输出；时间戳用于区分。
+
+## 24. UI 与交互
+
+### 24.1 视觉
+
+- 蓝白主题。
+- 第一版仅亮色。
+- 现代、简洁、内容密度适合工程工具。
+- 状态颜色至少区分成功、警告、错误、未连接和未保存。
+
+### 24.2 桌面布局
+
+推荐三栏：
+
+1. 左栏：工程文件树和功能导航。
+2. 中栏：Prompt/Regex/脚本编辑器。
+3. 右栏：属性、静态预览、ST 调试结果。
+
+### 24.3 平板布局
+
+- 横屏尽量保留分栏。
+- 可折叠左侧树和右侧检查器。
+- 使用 Monaco。
+- 支持触控拖拽和较大命中区域。
+
+### 24.4 手机布局
+
+- 单栏。
+- 底部导航或顶部标签切换：结构、编辑、预览、ST。
+- 属性面板使用全屏抽屉。
+- CodeMirror 6 替代 Monaco。
+- 拖拽排序提供触控手柄及上移/下移替代按钮。
+- 真实交互通过“在 ST 中查看”跳转。
+
+### 24.5 关键状态
+
+界面持续显示：
+
+- ST 连接状态。
+- 工程自动保存状态。
+- 当前工程名和可选 version。
+- 当前编辑文件。
+- JSON 构建状态。
+- 当前 ST preset 映射。
+- 是否存在未推送修改。
+
+“未推送修改”与“未保存工程”是两个独立状态。
+
+## 25. 服务端 API 建议
+
+第一版 REST API 可按以下资源组织：
+
+### 25.1 项目
+
+- GET /api/projects
+- POST /api/projects
+- GET /api/projects/:projectId
+- DELETE /api/projects/:projectId
+- POST /api/projects/import/json
+- POST /api/projects/import/archive
+- GET /api/projects/:projectId/archive
+
+### 25.2 文件
+
+- GET /api/projects/:projectId/files
+- GET /api/projects/:projectId/files/*
+- PUT /api/projects/:projectId/files/*
+- POST /api/projects/:projectId/flush
+
+### 25.3 构建与导出
+
+- POST /api/projects/:projectId/build
+- POST /api/projects/:projectId/export
+- GET /api/projects/:projectId/outputs
+- GET /api/projects/:projectId/outputs/:filename
+
+### 25.4 ST Bridge
+
+- GET /api/st/connections
+- POST /api/st/pairing
+- WebSocket /bridge
+- POST /api/projects/:projectId/pull-snapshot
+- POST /api/projects/:projectId/push-preset
+- POST /api/projects/create-from-st
+
+具体路由可以在技术设计阶段调整，但资源边界保持不变。
+
+## 26. 校验与诊断
+
+### 26.1 导入校验
+
+- JSON 语法。
+- Chat Completion preset 基本结构。
+- prompts 类型。
+- prompt_order 引用。
+- identifier 重复或缺失。
+- Prompt 定义未进入 order。
+- order 引用不存在的 Prompt。
+- Regex UUID 冲突。
+- Regex 三镜像一致性。
+- Tavern Helper 脚本结构。
+- 未知扩展报告。
+
+### 26.2 构建校验
+
+- 所有工程索引指向存在的文件。
+- 所有 Prompt meta/content 可读取。
+- prompt_order 可重建。
+- Regex mirror target 可重建。
+- SPresetSettings 序列化正确。
+- JSON 可被重新解析。
+- 与未修改源进行语义 round-trip 比较。
+
+### 26.3 静态诊断
+
+- Prompt 宏格式。
+- setvar/getvar 关系。
+- Regex 语法。
+- Regex 无匹配或过宽匹配提示。
+- replacement HTML 基本解析。
+- Script 语法检查。
+- 大文件和超长单行提示。
+
+静态诊断不负责证明项目安全。
+
+## 27. 性能要求
+
+第一版必须以示例 8.8 MB preset 为基准：
+
+- 导入不导致浏览器长时间无响应。
+- Prompt 列表使用虚拟滚动。
+- Regex 列表使用虚拟滚动。
+- 大脚本按需加载。
+- 不一次性把全部大型脚本装入所有编辑器 model。
+- 自动保存只写变化文件，不序列化整个工程。
+- JSON 构建放在 Node 或 Worker 中。
+- UI 主线程的长任务应可观测。
+
+建议目标：
+
+- 普通 Prompt 输入响应保持流畅。
+- 自动保存状态在防抖结束后及时更新。
+- 大脚本首次打开可以出现加载提示，但不能导致页面崩溃。
+- 移动端默认不自动打开 3 MB 级脚本。
+
+## 28. 安全与信任边界
+
+### 28.1 已确认立场
+
+- 产品是工具，不承担判断第三方 preset JavaScript 是否安全的责任。
+- 不实现复杂的项目脚本权限或能力系统。
+- 项目 JavaScript 只在用户自己的真实 ST 中执行。
+
+### 28.2 工具侧最低边界
+
+- 静态预览不执行项目 JS。
+- 工程上传 ZIP 防止路径穿越。
+- Node 文件 API 限制在工作区根目录。
+- 不访问或保存 ST 登录密码、Cookie、CSRF Token 或 secrets/API Key 存储。
+- 完整 preset 自身携带的代理密码、连接地址或自定义请求头属于 preset 数据，会进入工程；界面必须在从 ST 拉取、下载 ZIP 和导出时提示敏感配置边界。
+- 日志不主动记录这些秘密。
+
+### 28.3 部署边界
+
+第一版没有用户和鉴权系统，因此：
+
+- 默认只面向 localhost、可信 LAN 或 VPN。
+- 不承诺公网安全部署。
+- 如果部署者要暴露公网，应在外部反向代理层自行增加 HTTPS 和访问控制。
+
+### 28.4 ST 执行边界
+
+在真实 ST 中运行的项目脚本可能访问 ST 页面、聊天、预设、localStorage、IndexedDB 和网络。工具不会改变这一权限模型。
+
+## 29. 日志与可观测性
+
+服务端日志至少包含：
+
+- 工程创建、打开、保存、构建和导出。
+- Bridge 连接、断线和版本。
+- snapshot 拉取。
+- preset 推送。
+- 构建和校验错误。
+
+日志不得主动记录：
+
+- ST 登录密码；preset 自身连接字段的值也不得写入日志。
+- Cookie。
+- CSRF Token。
+- LLM API Key。
+
+前端调试台至少显示：
+
+- Bridge 状态。
+- 请求 ID。
+- 当前调试步骤。
+- ST 回传错误。
+- 构建错误。
+- 自动保存错误。
+
+## 30. 测试策略
+
+### 30.1 单元测试
+
+- JSON 导入和拆分。
+- Prompt 三状态转换。
+- prompt_order 重建。
+- Regex 镜像识别和重建。
+- SPresetSettings 序列化。
+- 工程路径和安全文件名。
+- 输出文件命名。
+- 自动保存 revision。
+- ZIP 安全解压。
+
+### 30.2 Golden 测试
+
+使用示例 preset 执行：
+
+1. 导入。
+2. 不做修改。
+3. 构建。
+4. 深度比较源 JSON 与输出 JSON。
+
+必须验证：
+
+- 217 个 Prompt 保留。
+- 212 个 order 项保留。
+- 未进入 order 的 Prompt 保留。
+- 40 个 Regex 保留。
+- 三份 Regex 镜像一致。
+- SPresetSettings 内容正确重建。
+- 3 个 Tavern Helper 脚本保留。
+- 大型脚本内容哈希不变。
+- 未知字段不丢失。
+
+### 30.3 集成测试
+
+- Docker volume 持久化。
+- JSON 上传创建工程。
+- 工程 ZIP 上传和下载。
+- 自动保存后重启容器恢复。
+- ST Bridge 1.18.0 连接。
+- 从 ST 当前 preset 创建工程。
+- 从 ST 拉取只读 snapshot。
+- 捕获最终 Prompt。
+- 捕获 ST 静态 DOM 快照。
+- 手动推送 preset。
+- 推送并应用。
+- 工具中项目 JS 不执行。
+- 项目 JS 在 ST 中按真实环境执行。
+
+### 30.4 响应式测试
+
+- 桌面 Chrome/Edge/Firefox/Safari 的现代版本。
+- Android 和 iOS 的现代浏览器。
+- 桌面 Monaco。
+- 横屏平板 Monaco。
+- 手机 CodeMirror 6。
+- 竖屏窄宽度下无关键操作丢失。
+
+## 31. 第一版验收标准
+
+满足以下条件时第一版可验收：
+
+1. Docker Compose 可启动工具并通过 volume 保留工程。
+2. 工具必须连接 ST 1.18.0 才能进入完整工作台。
+3. 工具不要求或保存 ST 用户名和密码。
+4. 可从 ST 当前 Chat Completion preset 创建工程。
+5. 可从示例 JSON 创建工程。
+6. 可创建空白工程。
+7. 可上传和下载工程 ZIP。
+8. Prompt 定义、插入和启用状态被正确区分。
+9. 可编辑、排序、添加、删除、插入和移除 Prompt。
+10. Regex 可结构化编辑和静态测试。
+11. 示例 Regex 三镜像被识别为一个逻辑集合。
+12. 集合内部相似规则不被自动合并。
+13. Tavern Helper 脚本可用 Monaco/CodeMirror 编辑。
+14. 工具内不执行项目 JavaScript。
+15. 工具可进行 HTML/CSS 静态预览。
+16. 可在 ST 中进行真实 JavaScript 和前端运行测试。
+17. 可从 ST 单向拉取只读上下文快照。
+18. 工具不提供上下文文件上传或写回。
+19. 自动保存只修改工程。
+20. preset 只能通过手动操作推送到 ST。
+21. 推送前构建、校验并显示目标差异。
+22. 可导出带可选 version 和时间戳的 JSON。
+23. 未修改示例可完成语义无损 round-trip。
+24. 工具不保存 LLM API Key，也不实现模型请求客户端。
+25. 桌面、横屏平板和手机布局可用。
+
+## 32. 实施阶段
+
+### 阶段 0：技术验证
+
+- 验证 ST 1.18.0 Bridge 扩展。
+- 验证当前 preset 读取。
+- 验证 preset 保存和激活。
+- 验证 Prompt 事件捕获。
+- 验证上下文摘要和 snapshot 拉取。
+- 验证渲染 DOM 静态快照。
+- 验证手机浏览器连接保持。
+
+阶段 0 是后续开发的前置门槛。
+
+### 阶段 1：工程内核
+
+- Node/Vite/React 基础工程。
+- Docker 和 volume。
+- 项目 API。
+- JSON 导入。
+- 工程 ZIP。
+- 拆分格式。
+- 自动保存。
+- 构建与语义 round-trip。
+
+### 阶段 2：Prompt 工作台
+
+- Prompt 三状态列表。
+- 拖拽排序。
+- 内容和元数据编辑。
+- 宏静态分析。
+- marker 显示。
+- 移动端布局。
+
+### 阶段 3：Regex 与脚本
+
+- Regex 结构化编辑。
+- 三镜像联动。
+- 静态 Regex 流水线。
+- HTML/CSS 静态预览。
+- Monaco/CodeMirror 脚本编辑。
+- 大文件优化。
+
+### 阶段 4：ST 联调
+
+- 强制连接入口。
+- Bridge 状态和版本握手。
+- 从 ST preset 创建工程。
+- 单向上下文 snapshot。
+- 最终 Prompt 和 token 展示。
+- ST 静态 DOM 快照。
+- 在 ST 中查看。
+
+### 阶段 5：推送、验收与交付
+
+- 手动推送和应用。
+- 推送差异确认。
+- 示例 golden 测试。
+- Docker Compose 文档。
+- Bridge 安装文档。
+- 使用手册。
+- 性能和响应式验收。
+
+## 33. 主要风险与应对
+
+| 风险 | 影响 | 第一版应对 |
+|---|---|---|
+| ST release 更新导致内部 API 变化 | Bridge 失效 | 固定 1.18.0 基线、版本握手、能力检查 |
+| 已有 ST 扩展环境差异 | 渲染结果不同 | 以用户真实 ST 为权威，工具只展示结果 |
+| 手机后台暂停页面/WebSocket | 调试中断 | 心跳、重连、明确要求 ST 页面保持可用 |
+| 3 MB 级脚本编辑性能 | 页面卡顿或崩溃 | 懒加载、Worker、大文件模式、移动端 CodeMirror |
+| 8.8 MB JSON 整体序列化 | 导入/构建延迟 | Node/Worker 构建、进度状态、只保存变化文件 |
+| Regex 镜像不一致 | 导出覆盖数据 | 冲突诊断，不静默联动 |
+| 无鉴权部署在公网 | 数据泄露或被修改 | 明确仅可信网络，公网由部署者外加访问控制 |
+| ST 当前上下文与 snapshot 不一致 | 调试不可复现 | 哈希对比和过期提示 |
+| 工具静态预览与 ST 渲染差异 | 用户误判 | 明确标记预览类型，提供 ST 快照与真实查看 |
+
+## 34. 后续版本方向
+
+第一版之后可以考虑：
+
+- 直接保存到更多 ST 内容类型。
+- 角色、聊天、Persona、World Info 双向同步。
+- 同步冲突解决。
+- 多 ST 实例和多连接管理。
+- 版本管理、历史、分支和差异恢复。
+- 暗色主题。
+- 国际化。
+- 无障碍完善。
+- 更多 preset 类型。
+- 更完整的 ST 扩展调试与网络面板。
+- 受控的 JavaScript 沙箱和权限报告。
+- 多用户、鉴权和公网部署。
+- 专用测试 ST 容器。
+
+这些内容不进入第一版排期。
+
+## 35. 参考资料
+
+- SillyTavern 源码：https://github.com/SillyTavern/SillyTavern
+- SillyTavern 官方文档：https://docs.sillytavern.app/
+- Chat Completion 文档：https://docs.sillytavern.app/usage/api-connections/openai/
+- Tokenizer 文档：https://docs.sillytavern.app/usage/prompts/tokenizer/
+- UI Extension 文档：https://docs.sillytavern.app/for-contributors/writing-extensions/
+- World Info 文档：https://docs.sillytavern.app/usage/core-concepts/worldinfo/
+- Chat 文件文档：https://docs.sillytavern.app/usage/core-concepts/chatfilemanagement/
+- SillyTavern 1.18.0：https://github.com/SillyTavern/SillyTavern/releases/tag/1.18.0
+- 参考 VSCode 插件：https://github.com/Mooooooon/SillyTavern-Preset-Editor
+
+---
+
+本实施方案作为第一版开发基线。后续需求变更应明确修改对应章节，并同步更新验收标准和阶段范围。

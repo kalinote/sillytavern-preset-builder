@@ -1,0 +1,229 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { createApiServer } from "../src/http.js";
+
+function minimalPreset() {
+  return {
+    temperature: 1,
+    prompts: [{ identifier: "main", name: "Main", content: "Hello", role: "system" }],
+    prompt_order: [{ character_id: 100001, order: [{ identifier: "main", enabled: true }] }],
+    extensions: { unknown: { keep: true } },
+  };
+}
+
+test("HTTP project lifecycle supports JSON import, file access, build, and export", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-http-"));
+  const { server } = createApiServer({ workspaceRoot: root, staticRoot: false });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const importedResponse = await fetch(`${base}/api/projects/import/json`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "API fixture", version: "1", preset: minimalPreset() }),
+    });
+    assert.equal(importedResponse.status, 201);
+    const imported = await importedResponse.json() as { project: { id: string } };
+    assert.match(imported.project.id, /^project-/);
+
+    const filesResponse = await fetch(`${base}/api/projects/${imported.project.id}/files`);
+    assert.equal(filesResponse.status, 200);
+    const files = await filesResponse.json() as { files: Array<{ path: string; type: string }> };
+    const contentFile = files.files.find((entry) => entry.type === "file" && entry.path.endsWith("/content.md"));
+    assert(contentFile);
+
+    const fileResponse = await fetch(
+      `${base}/api/projects/${imported.project.id}/files/${contentFile.path.split("/").map(encodeURIComponent).join("/")}`,
+    );
+    const file = await fileResponse.json() as { content: string; revision: string };
+    assert.equal(file.content, "Hello");
+
+    const saveResponse = await fetch(
+      `${base}/api/projects/${imported.project.id}/files/${contentFile.path.split("/").map(encodeURIComponent).join("/")}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "Hello API", ifRevision: file.revision }),
+      },
+    );
+    assert.equal(saveResponse.status, 200);
+
+    const buildResponse = await fetch(`${base}/api/projects/${imported.project.id}/build`, { method: "POST" });
+    assert.equal(buildResponse.status, 200);
+    const build = await buildResponse.json() as { success: boolean; preset: { prompts: Array<{ content: string }> } };
+    assert.equal(build.success, true);
+    assert.equal(build.preset.prompts[0]?.content, "Hello API");
+
+    const exportResponse = await fetch(`${base}/api/projects/${imported.project.id}/export`, { method: "POST" });
+    assert.equal(exportResponse.status, 201);
+    const exported = await exportResponse.json() as { downloadUrl: string; filename: string };
+    const downloadResponse = await fetch(`${base}${exported.downloadUrl}`);
+    assert.equal(downloadResponse.status, 200);
+    assert.match(downloadResponse.headers.get("content-disposition") ?? "", /attachment/);
+    const downloaded = await downloadResponse.json() as { prompts: Array<{ content: string }> };
+    assert.equal(downloaded.prompts[0]?.content, "Hello API");
+
+    const archiveResponse = await fetch(`${base}/api/projects/${imported.project.id}/archive`);
+    assert.equal(archiveResponse.status, 200);
+    assert.equal(archiveResponse.headers.get("content-type"), "application/zip");
+    assert.match(archiveResponse.headers.get("content-disposition") ?? "", /attachment/);
+    const archiveBytes = await archiveResponse.arrayBuffer();
+    const form = new FormData();
+    form.append("file", new Blob([archiveBytes], { type: "application/zip" }), "project.zip");
+    form.append("name", "HTTP archive copy");
+    form.append("version", "v2");
+    const archiveImportResponse = await fetch(`${base}/api/projects/import/archive`, {
+      method: "POST",
+      body: form,
+    });
+    assert.equal(archiveImportResponse.status, 201);
+    const archiveImport = await archiveImportResponse.json() as {
+      project: { id: string; name: string; version: string };
+      import: { originalProjectId: string; idRegenerated: boolean };
+    };
+    assert.notEqual(archiveImport.project.id, imported.project.id);
+    assert.equal(archiveImport.project.name, "HTTP archive copy");
+    assert.equal(archiveImport.project.version, "v2");
+    assert.equal(archiveImport.import.originalProjectId, imported.project.id);
+    assert.equal(archiveImport.import.idRegenerated, true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HTTP errors have a stable envelope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-http-errors-"));
+  const { server } = createApiServer({ workspaceRoot: root, staticRoot: false, bodyLimitBytes: 128 });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/projects/import/json`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ preset: { prompts: [] } }),
+    });
+    assert.equal(response.status, 422);
+    const body = await response.json() as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "INVALID_PRESET");
+    assert(body.error.message.length > 0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HTTP origin policy allows same-origin, explicit origins, proxy same-origin, and CLI only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-http-origin-"));
+  const allowedOrigin = "https://studio.example";
+  const { server } = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    allowedOrigins: [allowedOrigin],
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const cliHealth = await fetch(`${base}/api/health`);
+    assert.equal(cliHealth.status, 200);
+    assert.equal(cliHealth.headers.get("access-control-allow-origin"), null);
+    const healthBody = await cliHealth.json() as { ok: boolean; workspaceRoot?: string };
+    assert.equal(healthBody.ok, true);
+    assert.equal(Object.hasOwn(healthBody, "workspaceRoot"), false);
+
+    const sameOrigin = await fetch(`${base}/api/health`, { headers: { Origin: base } });
+    assert.equal(sameOrigin.status, 200);
+    assert.equal(sameOrigin.headers.get("access-control-allow-origin"), base);
+
+    const explicitlyAllowed = await fetch(`${base}/api/health`, { headers: { Origin: allowedOrigin } });
+    assert.equal(explicitlyAllowed.status, 200);
+    assert.equal(explicitlyAllowed.headers.get("access-control-allow-origin"), allowedOrigin);
+
+    const proxySameOrigin = await fetch(`${base}/api/health`, {
+      headers: {
+        Origin: "http://localhost:4174",
+        "Sec-Fetch-Site": "same-origin",
+      },
+    });
+    assert.equal(proxySameOrigin.status, 200);
+    assert.equal(proxySameOrigin.headers.get("access-control-allow-origin"), "http://localhost:4174");
+
+    const rejected = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { Origin: "https://evil.example", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "must-not-exist" }),
+    });
+    assert.equal(rejected.status, 403);
+    assert.equal(rejected.headers.get("access-control-allow-origin"), null);
+    const rejectedBody = await rejected.json() as { error: { code: string } };
+    assert.equal(rejectedBody.error.code, "ORIGIN_NOT_ALLOWED");
+    assert.equal((await (await fetch(`${base}/api/projects`)).json() as { projects: unknown[] }).projects.length, 0);
+
+    const allowedPreflight = await fetch(`${base}/api/projects`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Content-Type",
+      },
+    });
+    assert.equal(allowedPreflight.status, 204);
+    assert.equal(allowedPreflight.headers.get("access-control-allow-origin"), allowedOrigin);
+    assert.match(allowedPreflight.headers.get("access-control-allow-methods") ?? "", /POST/);
+
+    const rejectedPreflight = await fetch(`${base}/api/projects`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://evil.example",
+        "Access-Control-Request-Method": "POST",
+      },
+    });
+    assert.equal(rejectedPreflight.status, 403);
+
+    const rejectedHeader = await fetch(`${base}/api/projects`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Authorization",
+      },
+    });
+    assert.equal(rejectedHeader.status, 403);
+    assert.equal((await rejectedHeader.json() as { error: { code: string } }).error.code, "CORS_HEADERS_NOT_ALLOWED");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("health exposes the workspace path only when explicitly enabled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-http-health-path-"));
+  const { server } = createApiServer({ workspaceRoot: root, staticRoot: false, exposeWorkspacePath: true });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/health`);
+    const body = await response.json() as { ok: boolean; workspaceRoot?: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.workspaceRoot, root);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
