@@ -9,7 +9,7 @@ const bodyLimitBytes = Number.isFinite(configuredLimit) && configuredLimit > 0
   ? Math.floor(configuredLimit * 1024 * 1024)
   : 64 * 1024 * 1024;
 
-const { server, store, bridge } = createApiServer({ bodyLimitBytes });
+const { server, store, stSessions } = createApiServer({ bodyLimitBytes });
 await store.initialize();
 
 server.listen(port, host, () => {
@@ -19,7 +19,7 @@ server.listen(port, host, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    bridge.close();
+    stSessions.close();
     server.close((error) => {
       if (error) {
         console.error(error);
@@ -31,5 +31,5 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 export { createApiServer } from "./http.js";
 export { ProjectStore } from "./project-store.js";
-export { BridgeManager } from "./bridge.js";
-export type { BridgeManagerOptions, PublicBridgeConnection } from "./bridge.js";
+export { StSessionManager } from "./st-session-manager.js";
+export type { StSessionInfo, StSessionManagerOptions } from "./st-session-manager.js";

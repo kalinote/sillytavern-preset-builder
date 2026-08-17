@@ -6,9 +6,9 @@
 > 测试基准文件：[主预设] V18 狐神抚 · 毓忻.json  
 > 产品暂用名：Preset Studio
 
-## 0. 当前实施进度（2026-08-15）
+## 0. 当前实施进度（2026-08-16）
 
-当前版本已经完成可运行的“工程内核 + 真实源码编辑器 + 基础静态预览 + Bridge v1 preset 快照”纵切片，但尚未达到本文定义的完整第一版。
+当前版本已经完成可运行的“工程内核 + 真实源码编辑器 + 基础静态预览 + Node 直连 ST preset”纵切片，但尚未达到本文定义的完整第一版。原 Bridge UI Extension 方案已经废止：用户不需要向 SillyTavern 安装额外扩展，Preset Studio Node 直接使用 ST 1.18.x 的服务端 HTTP API。
 
 已接通的能力：
 
@@ -18,18 +18,19 @@
 - 桌面与常规横屏平板 Monaco、手机与矮横屏设备 CodeMirror 6；大文件模式、按需加载、选择与滚动位置的会话内恢复。
 - HTML/CSS 无脚本静态预览，含 320ms 刷新防抖、桌面/平板/手机画布、缩放、空 sandbox、CSP 和 no-referrer。
 - Dockerfile、Compose、工作区 volume、非 root runtime、healthcheck；API Origin 白名单与健康接口隐私边界。
-- Bridge v1 一次性配对、版本/能力握手、心跳、会话内恢复与连接门禁；配套 ST 1.18.0 UI Extension 不接触 ST 登录会话或 secrets 存储。
-- 从已连接 ST 的当前 Chat Completion preset 手动创建新工程；快照只单向写入新工程，不建立持续同步。
+- 单活动 ST 内存会话、目标地址策略、Basic/账号认证、Cookie jar、CSRF、版本/兼容性检查与连接门禁。
+- 列出并读取已连接 ST 的 Chat Completion presets，从用户选定的 preset 手动创建新工程；快照只单向写入新工程，不建立持续同步。
+- 推送前构建、目标存在性检查和短时确认 token；用户确认后只把 preset 保存到 ST，不操作已经打开的 ST 页面。
 
 尚未接通的第一版核心能力：
 
-- 角色、聊天、Persona、World Info 一次性只读快照。
+- 角色、聊天、Persona、World Info 一次性只读快照。没有页面扩展时，服务端 API 无法可靠表达某个已打开浏览器标签页的“当前上下文”，需另行设计。
 - Prompt 三态、顺序、字段表单和宏分析等结构化工作台。
 - Regex 结构化编辑、顺序测试、逐步 diff、静态诊断和镜像冲突处理 UI。
-- 最终 Prompt/token/裁剪/usage、ST DOM 快照、真实运行入口和 preset 手动推送/应用。
+- 最终 Prompt/token/裁剪/usage、ST DOM 快照和运行事件捕获。直连 HTTP API 不提供已打开 ST 页面的 DOM、Console 或 Prompt 事件流。
 - PWA manifest、Service Worker 和完整第一版验收。
 
-当前自动验证基线为前后端生产构建通过、服务端 18 项测试通过，Bridge 扩展通过 JavaScript/manifest 静态校验，并可由服务端下载固定白名单安装包。Docker 配置已完成，但仍需在安装 Docker CLI 的环境中执行真实镜像构建与 volume 重启验收；Bridge 扩展仍需安装到真实 ST 1.18.0 完成浏览器运行时联调。
+自动验证基线包括前后端生产构建、工程后端测试和 ST 直连客户端的隔离测试。Docker 配置已完成，但仍需在安装 Docker CLI 的环境中执行真实镜像构建、volume 重启和容器到 LAN ST 的网络验收；真实 ST 1.18.x 仍需覆盖无认证、Basic、多用户登录、preset 读取和手动保存。
 
 ## 1. 文档目的
 
@@ -65,9 +66,9 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 1. Prompt 的结构化编辑、排序、启用和静态分析。
 2. 将 preset JSON 拆成可维护的多文件工程，并自动保存工程。
 3. Regex 的结构化编辑、静态测试和 HTML/CSS 设计预览。
-4. 使用真实 SillyTavern 运行时获得最终 Prompt、token 信息和真实前端展示。
+4. 把构建后的 preset 手动保存到真实 SillyTavern，再由用户在 ST 页面中选择并查看真实前端展示。
 5. 在工具中编辑 Tavern Helper 等 JavaScript 源码，但只在真实 ST 中执行。
-6. 从真实 ST 单向拉取当前 preset、角色、聊天、Persona 和 World Info 快照。
+6. 从真实 ST 单向拉取用户明确选择的 preset；角色、聊天、Persona 和 World Info 同步留待后续接口设计。
 7. 将工具中的 preset 工程手动构建、校验、导出，或手动推送到真实 ST。
 8. 提供蓝白主题、现代化、适配桌面、平板和手机的 Web/PWA 界面。
 
@@ -91,18 +92,17 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 
 ### 4.3 必须连接真实 ST
 
-- 第一版使用工具前必须连接一个已经运行的 SillyTavern。
+- 第一版使用工具前必须连接一个已经运行且 Node 网络可达的 SillyTavern。
 - 第一版不内置或额外启动 SillyTavern 容器。
 - 连接目标是用户已有的最新稳定版 ST。
 - 未连接 ST 时只显示连接入口，不开放完整工程编辑和调试界面。
-- ST 负责所有动态运行逻辑；工具不实现完整的 ST Prompt/运行时模拟器。
+- ST 页面负责所有动态运行逻辑；工具不实现完整的 ST Prompt/运行时模拟器，也不尝试通过服务端 REST 控制已打开的页面。
 
 ### 4.4 只有 preset 可以写回 ST
 
 - preset 工程可以保存、导出 JSON，并手动推送到真实 ST。
-- 角色、聊天、Persona、World Info 只允许从 ST 单向拉取。
-- 这些上下文快照在工具中为只读数据。
-- 第一版不把角色、聊天、Persona 或 World Info 从工具写回 ST。
+- 后续若加入角色、聊天、Persona、World Info，仍只允许从 ST 单向拉取并作为只读数据。
+- 第一版不提供这些内容的上传或写回。
 - 第一版不做持续同步、双向同步或冲突合并。
 
 ### 4.5 动态执行交给 ST
@@ -110,7 +110,7 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 - 项目 JavaScript 只在真实 SillyTavern 中执行。
 - 工具不执行 Tavern Helper、inline handler 或其他项目脚本。
 - 工具只提供 HTML/CSS 和无 JavaScript 原生交互的静态预览。
-- JavaScript 驱动的按钮、粒子、动态面板、网络、存储和 ST API 行为，必须进入真实 ST 查看。
+- JavaScript 驱动的按钮、粒子、动态面板、网络、存储和 ST API 行为，必须在用户刷新 preset 列表、手动选择目标后进入真实 ST 查看。
 
 ## 5. 第一版范围
 
@@ -134,7 +134,7 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 
 第一版支持以下方式创建或打开工程：
 
-1. 从真实 ST 当前 Chat Completion preset 创建新工程。
+1. 从真实 ST 中用户选择的 Chat Completion preset 创建新工程。
 2. 上传 Chat Completion preset JSON 创建新工程。
 3. 上传 Preset Studio 工程压缩包恢复工程。
 4. 在已连接 ST 的前提下创建空白 Chat Completion preset 工程。
@@ -147,7 +147,7 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 - 自动保存拆分工程到 Docker 工作区。
 - 下载完整工程压缩包。
 - 构建并下载标准 preset JSON。
-- 将构建后的 preset 手动推送到 ST。
+- 将构建后的 preset 先预览、确认，再手动保存到 ST。
 - 将导出的 JSON 同时保存到工程的 output 目录。
 
 ## 6. 第一版非目标
@@ -161,6 +161,9 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 - 工具侧 LLM API Key、提供商或模型配置。
 - 工具侧 OpenAI-compatible 请求客户端或中继。
 - 完整复刻 SillyTavern 的宏、World Info、token 裁剪和动态运行时。
+- 控制已打开的 ST 浏览器页面、自动切换当前 preset 或声称“已应用”。
+- 捕获 ST 页面的最终 Prompt、真实 token、DOM、Console 或生成事件。
+- 角色、聊天、Persona、World Info 的“当前页面上下文”同步；服务端 REST 无法可靠定位某个浏览器标签页的当前状态。
 - 工具内项目 JavaScript 执行。
 - 角色卡 JSON/PNG 上传。
 - 聊天 JSONL 上传。
@@ -182,23 +185,21 @@ SillyTavern 的 Chat Completion preset 本质上是可由酒馆界面直接导�
 系统由三个主要部分组成：
 
 1. **Preset Studio Web/PWA**
-   - 提供编辑器、项目管理、静态预览和调试结果 UI。
+   - 提供编辑器、项目管理、静态预览和 ST 连接 UI。
    - 桌面与横屏平板使用 Monaco。
    - 手机使用 CodeMirror 6。
 
 2. **Preset Studio Node 服务**
    - 保存拆分工程。
    - 提供项目、文件、导入、导出和构建 API。
-   - 提供桥接 WebSocket。
-   - 不保存 ST 登录凭据。
+   - 作为受限 HTTP 客户端直接连接用户已有的 ST Server。
+   - 在内存中维护 ST Cookie jar、CSRF Token 和连接所需的 Basic 凭据；不持久化账号密码或会话秘密。
    - 不保存或使用 LLM API Key。
 
-3. **SillyTavern Bridge UI Extension**
-   - 安装在用户已有的 ST 中。
-   - 复用当前已登录的 ST 浏览器页面会话。
-   - 读取 ST 当前上下文。
-   - 捕获最终 Prompt、token、生成状态和渲染结果。
-   - 将工具构建的 preset 手动保存或应用到 ST。
+3. **用户已有的 SillyTavern Server 与页面**
+   - Server 提供 CSRF、用户登录、settings 和 preset REST API。
+   - 页面仍由用户直接使用，承担 LLM 生成、JavaScript 执行和真实渲染。
+   - 第一版不安装 Preset Studio 扩展，也不向已打开页面注入代码。
 
 ### 7.2 逻辑架构
 
@@ -208,15 +209,13 @@ flowchart LR
     W <--> N[Preset Studio Node 服务]
     N --> V[(Docker 持久化工作区)]
 
+    N <-->|受限 HTTP API| SS[SillyTavern Server]
     U --> SUI[已有 SillyTavern 页面]
-    SUI --> B[Preset Studio Bridge 扩展]
-    B <--> N
-
-    SUI --> SS[SillyTavern Server]
+    SUI <--> SS
     SS --> LLM[ST 当前配置的 LLM 提供商]
 
-    B -->|单向拉取| N
-    N -->|仅手动推送 preset| B
+    SS -->|所选 preset 单向快照| N
+    N -->|用户确认后保存 preset| SS
 ~~~
 
 ### 7.3 运行职责
@@ -232,8 +231,9 @@ flowchart LR
 | token 预算和上下文裁剪 | 否 | 是 |
 | LLM API Key 与生成请求 | 否 | 是 |
 | 真实 Regex/Markdown/DOM 渲染 | 否 | 是 |
-| preset 手动推送 | 发起 | 执行 |
-| 角色/聊天/Persona/WI 快照 | 保存只读副本 | 提供来源 |
+| preset 手动保存 | 构建、预览、发起 | 持久化 |
+| 当前页面切换 preset | 否 | 用户在 ST 页面手动执行 |
+| 角色/聊天/Persona/WI 快照 | 第一版暂缓 | 后续来源 |
 
 ## 8. 技术实现基线
 
@@ -255,8 +255,8 @@ flowchart LR
 
 - Node.js。
 - TypeScript。
-- npm 管理依赖。
-- HTTP REST API + WebSocket Bridge。
+- pnpm 管理依赖。
+- HTTP REST API，以及带目标策略、Cookie jar 和 CSRF 管理的 ST HTTP 客户端。
 - 文件系统作为第一版工程存储。
 - 不引入数据库作为第一版必要依赖。
 
@@ -265,56 +265,57 @@ flowchart LR
 - Dockerfile。
 - docker-compose.yml。
 - 单个 Preset Studio 服务。
-- 工作区挂载到固定数据目录，例如 /app/data。
+- 工作区挂载到固定数据目录 `/app/workspace-data`。
 - 推荐宿主机映射：
 
 ~~~yaml
 services:
   preset-studio:
     volumes:
-      - ./data:/app/data
+      - ./workspace-data:/app/workspace-data
 ~~~
 
-- 远程或跨设备访问时使用 HTTPS/WSS。
+- 远程或跨设备访问时使用 HTTPS。
+- ST 会话依赖 SameSite=Strict、HttpOnly Cookie，UI 和 `/api` 必须同源；分离托管时由 UI Origin 反向代理 `/api`，不能只配置 CORS。
+- Docker 连接宿主机或 LAN ST 时，需要保证容器网络可达，并用 `PRESET_STUDIO_ST_ALLOWED_ORIGINS` 精确授权，或显式选择 `private`。
+- ST 网络请求由 Node/容器发出，不能把浏览器能够打开某地址等同于容器能够访问。
 - 因第一版无鉴权，部署定位为 localhost、可信局域网或 VPN；不支持直接暴露公网。
 
-## 9. ST 连接与桥接
+## 9. ST 直连与会话
 
 ### 9.1 连接原则
 
-- 工具不要求输入 ST 用户名和密码。
-- 用户先在 ST 页面正常完成登录。
-- Bridge 扩展运行在该已登录页面中。
-- Bridge 使用当前页面现有 session 和 SillyTavern.getContext()。
-- Bridge 主动连接 Preset Studio Node 的 WebSocket。
-- ST 登录失效时，由用户在 ST 页面重新登录；工具不介入。
+- 浏览器只连接 Preset Studio Node；Node 直接请求用户指定的 ST HTTP(S) Origin。
+- ST 无认证时只填写 Origin；开启 Basic Authentication 或多用户登录时，用户在连接时实时输入对应凭据。
+- 凭据不写入磁盘、工程、日志、localStorage 或可被前端 JavaScript 读取的 Cookie。
+- Node 只在内存中保存 ST Cookie、CSRF Token、Basic 凭据和连接状态；重启、断开或空闲过期后必须重新连接。
+- 使用 256-bit opaque HttpOnly Cookie 把浏览器绑定到单个内存 ST 会话；API 不暴露 connectionId。
+- ST 页面登录与工具 Node 会话彼此独立；在一个页面中登录不会自动授权 Node。
 
 ### 9.2 连接流程
 
-1. 用户启动 Preset Studio。
-2. 工具显示连接页面和连接码。
-3. 用户打开已经登录的 ST。
-4. ST Bridge 扩展输入或发现 Preset Studio 地址。
-5. Bridge 携带连接码建立 WebSocket。
-6. Bridge 上报 ST 版本、能力和当前上下文摘要。
-7. Node 将连接绑定到当前浏览器会话。
-8. 前端进入项目工作台。
+1. 用户启动 Preset Studio，在连接页填写 ST Origin。
+2. 如目标要求认证，用户实时填写 Basic 或 ST 账号登录信息。
+3. Node 校验目标策略，只接受允许的 HTTP(S) Origin。
+4. Node 获取 `/csrf-token` 和 ST session Cookie。
+5. 如提供 ST 账号，Node 调用 `/api/users/login`；Basic 凭据按需附在每个请求上。
+6. Node 调用 `/version` 和 `/api/ping?extend=true` 检查版本与会话；目录请求再通过 `/api/settings/get` 读取 Chat Completion presets。
+7. Node 创建内存会话，并向浏览器设置 Preset Studio 自己的 HttpOnly 会话 Cookie。
+8. 前端显示会话摘要并进入工作台。
 
-连接码只用于关联调试会话，不是用户认证系统。
+Node 不把自己变成无限制的 URL 代理：默认 target policy 只允许回环 Origin 和精确白名单。容器连接可信 LAN 中的 ST 时，部署者必须显式配置精确 Origin 或 `private`；`any` 仅限完全可信网络。
 
 ### 9.3 版本握手
 
 第一版目标为编制时最新稳定版 ST 1.18.0。
 
-Bridge 建立连接时至少上报：
+连接检查至少报告：
 
 - ST 版本。
 - release/staging 分支标识，如可获得。
-- Bridge 版本。
-- Prompt 捕获能力。
 - preset 读取/保存能力。
-- 角色、聊天、Persona、World Info 读取能力。
-- DOM 快照能力。
+- 目标策略和实际认证方式。
+- ST 服务端公开的兼容性信息。
 
 处理规则：
 
@@ -327,54 +328,38 @@ Bridge 建立连接时至少上报：
 
 工作台应持续显示：
 
-- 已连接/断线/重连中。
+- 未连接/连接中/已连接/检查失败。
 - ST 地址或实例标签。
 - ST 版本。
-- 当前角色。
-- 当前聊天。
-- 当前 Persona。
-- 当前 Chat Completion preset。
+- 登录 handle（如 ST 返回）。
+- 可用认证方式、兼容性、最近检查时间和 target policy。
 
 断线后：
 
 - 停止所有新的 ST 操作。
-- 中止等待中的调试任务。
+- 中止等待中的 ST HTTP 操作并清除敏感内存状态。
 - 保留已经写入服务端的工程内容。
 - 返回连接恢复界面。
 
-### 9.5 Bridge 消息类别
+### 9.5 会话接口和 ST wire contract
 
-第一版 Bridge 协议至少包含：
+Studio 对前端提供单活动会话接口：
 
-- hello：版本和能力握手。
-- heartbeat：连接保活。
-- context.summary：当前 ST 上下文摘要。
-- preset.pull：读取当前 Chat Completion preset。
-- preset.push：手动保存或更新 preset。
-- preset.activate：激活指定 preset。
-- snapshot.pull：拉取当前只读上下文快照。
-- debug.run：使用当前 ST 上下文执行真实测试。
-- debug.prompt：回传最终 Prompt/messages。
-- debug.settings：回传生成设置和 token 信息。
-- debug.rendered：回传渲染后静态 DOM 快照。
-- debug.status：运行状态。
-- debug.error：错误与堆栈摘要。
+- `GET/POST/DELETE /api/st/session`。
+- `POST /api/st/session/check`。
+- `GET /api/st/presets`。
+- `POST /api/st/presets/read`，body 为 `{name}`。
 
-所有消息都应包含：
+Node 对 ST 1.18.x 使用 `/csrf-token`、`/api/users/login`、`/api/settings/get` 和 `/api/presets/save`。它解析 `settings` JSON 字符串、`openai_setting_names` 与 `openai_settings`，只管理 `apiId: "openai"` 的 Chat Completion presets。第一版不调用 `/api/settings/save`，避免覆盖整个用户设置；也不访问 secret store 或 LLM API。
 
-- 协议版本。
-- 请求 ID。
-- 会话 ID。
-- 项目 ID，如适用。
-- 时间戳。
-- 成功/失败状态。
+服务端请求不跟随跨目标重定向，并限制连接时间、总请求时间和响应体大小。日志和 API 响应必须清除 Authorization、账号密码、Cookie、CSRF Token 以及完整 preset 内容。
 
 ## 10. 工程生命周期
 
-### 10.1 从 ST 当前 preset 创建工程
+### 10.1 从 ST 所选 preset 创建工程
 
 1. 用户连接 ST。
-2. 工具读取当前 Chat Completion preset。
+2. 工具列出 Chat Completion presets，由用户明确选择来源。
 3. 工具显示来源名称、ST 版本和基本统计。
 4. 用户填写工程名称，可填写或留空工程 version。
 5. Node 创建新的项目 ID 和工作区目录。
@@ -405,7 +390,7 @@ Bridge 建立连接时至少上报：
 - ZIP 根目录必须包含 project.json。
 - 服务端解压时拒绝绝对路径、父目录跳转和符号链接逃逸。
 - 工程下载时由服务端即时打包。
-- 下载工程包含源码、只读快照、输出文件和 manifest。工具不访问 ST 登录 Cookie、登录密码、CSRF Token 或 secrets/API Key 存储；但完整 preset 自身可能保存 `proxy_password`、`reverse_proxy`、自定义请求头等连接字段，这些字段会随语义无损工程进入 ZIP 与导出 JSON，必须按敏感配置管理。
+- 下载工程包含源码、只读快照、输出文件和 manifest。Node 连接时使用的登录密码、Basic 凭据、ST Cookie 和 CSRF Token 只存在于内存会话，不进入工程包；但完整 preset 自身可能保存 `proxy_password`、`reverse_proxy`、自定义请求头等连接字段，这些字段会随语义无损工程进入 ZIP 与导出 JSON，必须按敏感配置管理。
 
 ### 10.5 工程打开规则
 
@@ -592,30 +577,28 @@ marker 是由 ST 在最终 Prompt 构建时填入角色信息、聊天历史、W
 
 宏静态分析只用于辅助编辑；真实展开结果以 ST 为准。
 
-## 15. 最终 Prompt 调试
+## 15. 真实 ST 手动调试
 
-最终 Prompt 调试不由工具模拟，必须使用真实 ST。
+最终 Prompt 和项目 JavaScript 不由工具模拟，必须使用真实 ST。由于第一版不安装页面扩展，Node 直连 REST 无法捕获已打开 ST 标签页的最终 messages、token 裁剪、Console 或 DOM；第一版只负责把待测 preset 安全保存到 ST，并把用户引导到 ST 页面完成观察。
 
 调试流程：
 
 1. 工具 flush 当前工程。
 2. 在内存中构建并校验 preset JSON。
-3. 用户手动将当前工程推送或应用到 ST。
-4. ST 使用当前角色、聊天、Persona、World Info 和连接配置执行生成。
-5. Bridge 捕获 ST 构建完成的 messages。
-6. Bridge 回传 token、生成设置、运行状态和错误。
-7. 工具以消息时间线展示 system/user/assistant 内容。
-8. 工具显示每段 Prompt 的来源映射；无法精确映射时标记为 ST 合并结果。
+3. 用户执行推送预览，确认 create/overwrite 目标和差异。
+4. 用户提交保存；工具明确提示“尚未应用到当前 ST 页面”。
+5. 用户打开 ST，刷新 preset 列表并手动选择保存的目标。
+6. ST 使用当前角色、聊天、Persona、World Info 和连接配置执行生成。
+7. 用户在 ST 自身界面或已有的第三方调试能力中查看 Prompt、token、Console 和渲染结果。
 
-工具展示的“最终 Prompt”是 ST 在后端提供商特定转换前构建完成的消息集合。最终上游 HTTP body 由 ST 负责调试，第一版工具不承诺捕获。
+工具不把“保存成功”描述为“已应用”或“已运行”。若后续需要把最终 Prompt 或 DOM 回传到工作台，必须单独选择经用户授权的页面集成方案，不能假定服务端 preset API 具备页面控制能力。
 
 ## 16. Token 预算
 
-- token 计算由真实 ST 和当前模型配置负责。
+- 真实 token 计算由 ST 页面和当前模型配置负责。
 - 工具不自行选择模型 tokenizer。
-- 工具显示 ST 返回的 token 统计、上下文上限、输出预留和裁剪结果。
-- 真实生成完成后，可显示 ST/提供商返回的 usage。
-- 静态编辑视图可提供字符数和近似提示，但不得标记为真实 token。
+- 第一版直连 API 不回传页面运行时 token 统计、上下文裁剪或生成 usage。
+- 静态编辑视图可提供字符数和近似提示，但必须标记为估算；真实结果在 ST 中查看。
 
 ## 17. Regex 工程模型
 
@@ -755,28 +738,13 @@ marker 是由 ST 在最终 Prompt 构建时填入角色信息、聊天历史、W
 工具必须清晰区分：
 
 - **本地设计预览**：HTML/CSS，非 ST 权威结果。
-- **ST 静态快照**：真实 ST 在某个时刻渲染完成的 DOM 副本。
 - **在 ST 中查看**：完整 JavaScript 和真实交互。
 
 ## 19. ST 静态 DOM 快照
 
-Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
+第一版直连方案不提供 ST 静态 DOM 快照。ST 的 preset REST API 只负责读取/保存配置，不能读取某个已打开浏览器页面的 DOM 或 computed styles。
 
-- 回传最终 HTML。
-- 可回传相关 computed styles 或必要样式引用。
-- 工具在无脚本 iframe 中展示。
-- 工具可与本地设计预览进行差异比较。
-
-快照不保留：
-
-- JavaScript 事件监听器。
-- 定时器。
-- 网络连接。
-- MutationObserver 后续状态。
-- localStorage/IndexedDB 状态。
-- 与 ST 父页面的持续交互。
-
-因此快照只用于查看和比较，完整交互必须在 ST 页面进行。
+工具保留本地无脚本 HTML/CSS 预览；真实渲染、事件监听器、定时器、网络、存储和 Tavern Helper 交互全部在 ST 页面中查看。后续若重新引入页面侧集成，DOM 快照必须作为独立可选能力设计，并清楚区分静态副本与可交互页面。
 
 ## 20. JavaScript 编辑
 
@@ -801,14 +769,14 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 
 - 工具只编辑、搜索、格式化和静态检查脚本。
 - 工具不执行项目脚本。
-- 用户点击真实调试时，由 ST 和对应扩展运行。
-- 工具可展示 ST 回传的 Console 和错误摘要。
+- 用户保存 preset 后，在 ST 页面手动选择目标并运行。
+- 第一版工具不捕获 ST 页面的 Console 或错误堆栈。
 
 ## 21. 上下文快照
 
 ### 21.1 快照来源
 
-全部来自当前连接的 ST：
+该能力在第一版直连重构中暂缓。以下是未来可能从 ST 单向拉取的对象：
 
 - 当前角色。
 - 当前聊天。
@@ -819,7 +787,9 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - 当前选中的全局 World Info。
 - 当前 ST 版本和相关源标识。
 
-### 21.2 快照属性
+服务端 REST 会话无法可靠表示某个已打开 ST 标签页的“当前角色/聊天/Persona”，因此不能把 settings 响应误当作页面上下文。第一版不展示伪造的当前上下文。
+
+### 21.2 未来快照属性
 
 - 单向拉取。
 - 一次性。
@@ -829,7 +799,7 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - 不参与冲突合并。
 - 可以创建多个带时间戳的快照。
 
-### 21.3 上下文变化
+### 21.3 未来上下文变化
 
 快照应记录源对象标识和内容哈希。
 
@@ -862,26 +832,27 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 2. 构建 preset JSON。
 3. 执行 schema、Prompt 引用、Regex 镜像和 JSON 校验。
 4. 获取目标 ST 当前对应 preset。
-5. 展示差异摘要。
+5. 展示 created/changed/unchanged、工程与远端 revision/体积和构建 diagnostics；字段级 Diff Viewer 可后续增强。
 6. 用户选择保存目标。
 7. 用户明确确认。
-8. Bridge 在 ST 中保存或更新 preset。
-9. 可选将它设为当前激活 preset。
-10. 回传保存结果和 ST 端最终名称。
+8. Node 使用 `/api/presets/save` 在 ST 中保存或更新 preset。
+9. 回传保存结果和 ST 端最终名称，并提示用户刷新 ST 列表、手动选择。
 
 ### 22.3 默认目标
 
 - 从 ST preset 创建的工程，默认映射回来源 preset。
 - 从 JSON 或空白创建的工程，默认目标名为 [Preset Studio] {projectName}。
 - project.json 保存 ST 目标名称。
-- 若目标名称冲突且不是已记录映射，默认创建新名称，不静默覆盖。
+- create 模式要求目标不存在；overwrite 模式要求目标已存在。模式与目标不匹配时拒绝，不静默改变语义。
 
 ### 22.4 推送操作
 
-界面建议提供两个明确动作：
+界面只提供语义准确的 **保存到 ST**：保存远端 preset，但不切换任何已打开页面的当前 preset。目标操作由用户在预览时明确选择：
 
-- **推送保存**：保存到 ST，但不切换当前 preset。
-- **推送并应用**：保存后设置为当前 Chat Completion preset。
+- **创建新 preset**：目标必须不存在。
+- **覆盖已有 preset**：目标必须存在，并显示远端 revision 与总体变化；不得在没有字段级比较时声称已展示完整 diff。
+
+预览返回的 256-bit token 仅在 Node 内存保存，5 分钟有效，绑定会话、工程、目标名、模式、工程构建 hash/revision 和远端 hash。每次提交尝试都会消费 token；任一绑定条件变化都要求重新预览。
 
 ## 23. JSON 构建与导出
 
@@ -995,16 +966,19 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - GET /api/projects/:projectId/outputs
 - GET /api/projects/:projectId/outputs/:filename
 
-### 25.4 ST Bridge
+### 25.4 ST 直连
 
-- GET /api/st/connections
-- POST /api/st/pairing
-- WebSocket /bridge
-- POST /api/projects/:projectId/pull-snapshot
-- POST /api/projects/:projectId/push-preset
-- POST /api/projects/create-from-st
+- GET /api/st/session
+- POST /api/st/session
+- DELETE /api/st/session
+- POST /api/st/session/check
+- GET /api/st/presets
+- POST /api/st/presets/read，body 为 `{name}`
+- POST /api/projects/create-from-st，body 为 `{presetName,name?,version?}`
+- POST /api/projects/:projectId/push-preview，body 为 `{targetName,mode:"create"|"overwrite"}`
+- POST /api/projects/:projectId/push-preset，body 为 `{previewToken}`
 
-具体路由可以在技术设计阶段调整，但资源边界保持不变。
+浏览器只通过 HttpOnly Cookie 选择当前内存会话，不传 connectionId。push 必须先 preview，服务端不接受绕过预览直接提交 preset JSON。
 
 ## 26. 校验与诊断
 
@@ -1077,9 +1051,14 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - 静态预览不执行项目 JS。
 - 工程上传 ZIP 防止路径穿越。
 - Node 文件 API 限制在工作区根目录。
-- 不访问或保存 ST 登录密码、Cookie、CSRF Token 或 secrets/API Key 存储。
+- 连接时可以接收 ST 账号密码或 Basic 凭据，但只用于建立/维持内存会话；不得写入磁盘、工程、日志、localStorage 或前端可读 Cookie。
+- ST Cookie、CSRF Token 和必要的 Basic 凭据只保存在 Node 内存，重启、断开或空闲超时即失效；浏览器只得到 256-bit opaque HttpOnly、SameSite=Strict 会话 Cookie。
+- 不访问 ST secret store 或 LLM API Key。
 - 完整 preset 自身携带的代理密码、连接地址或自定义请求头属于 preset 数据，会进入工程；界面必须在从 ST 拉取、下载 ZIP 和导出时提示敏感配置边界。
 - 日志不主动记录这些秘密。
+- ST target policy 默认只允许回环 Origin 与精确白名单；`private` 仅增加 IPv4 RFC1918 与 IPv6 ULA，`any` 必须显式启用。link-local（包括 `169.254/16`、`fe80::/10`）、unspecified、multicast/reserved、云 metadata 和非 HTTP(S) 目标在所有策略下始终拒绝。
+- 每次 ST 请求重新解析 DNS、校验全部结果并固定本次已校验地址；任何重定向都拒绝，同时限制连接超时、总请求时间和响应体大小。
+- 推送确认 token 为 256-bit 随机值、5 分钟有效、单次尝试消费，并绑定会话/工程/目标/模式/构建 hash 与远端 hash。
 
 ### 28.3 部署边界
 
@@ -1088,6 +1067,7 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - 默认只面向 localhost、可信 LAN 或 VPN。
 - 不承诺公网安全部署。
 - 如果部署者要暴露公网，应在外部反向代理层自行增加 HTTPS 和访问控制。
+- `private`/`any` 会扩大 Node 可访问的 ST 目标；不得让不可信用户控制连接或推送接口。
 
 ### 28.4 ST 执行边界
 
@@ -1098,9 +1078,8 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 服务端日志至少包含：
 
 - 工程创建、打开、保存、构建和导出。
-- Bridge 连接、断线和版本。
-- snapshot 拉取。
-- preset 推送。
+- ST 会话建立、检查、断开、目标 Origin 和版本。
+- preset 目录、读取、推送预览和保存结果。
 - 构建和校验错误。
 
 日志不得主动记录：
@@ -1112,7 +1091,7 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 
 前端调试台至少显示：
 
-- Bridge 状态。
+- ST 会话状态、兼容性和 target policy。
 - 请求 ID。
 - 当前调试步骤。
 - ST 回传错误。
@@ -1132,6 +1111,9 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - 输出文件命名。
 - 自动保存 revision。
 - ZIP 安全解压。
+- ST Origin 规范化、target policy、link-local/metadata 拒绝和 redirect 拒绝。
+- Cookie jar、CSRF、Basic/账号认证以及内存会话隔离/过期。
+- push preview token 的绑定、超时、单次消费与远端冲突。
 
 ### 30.2 Golden 测试
 
@@ -1160,13 +1142,11 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - JSON 上传创建工程。
 - 工程 ZIP 上传和下载。
 - 自动保存后重启容器恢复。
-- ST Bridge 1.18.0 连接。
-- 从 ST 当前 preset 创建工程。
-- 从 ST 拉取只读 snapshot。
-- 捕获最终 Prompt。
-- 捕获 ST 静态 DOM 快照。
-- 手动推送 preset。
-- 推送并应用。
+- ST 1.18.x 无认证、Basic、多用户登录及组合认证直连。
+- 列出/读取所选 ST preset 并创建一次性工程快照。
+- create/overwrite 目标规则、revision/总体变化预览与确认 token。
+- 手动保存 preset 后，在 ST 刷新并手动选择验证结果。
+- Node 重启、主动断开和空闲过期后敏感会话清除。
 - 工具中项目 JS 不执行。
 - 项目 JS 在 ST 中按真实环境执行。
 
@@ -1185,8 +1165,8 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 
 1. Docker Compose 可启动工具并通过 volume 保留工程。
 2. 工具必须连接 ST 1.18.0 才能进入完整工作台。
-3. 工具不要求或保存 ST 用户名和密码。
-4. 可从 ST 当前 Chat Completion preset 创建工程。
+3. 目标需要认证时可实时输入 ST 账号或 Basic 凭据，但工具不持久化、不回显、不记录这些信息。
+4. 可列出 ST Chat Completion presets，并从用户选择的 preset 创建工程。
 5. 可从示例 JSON 创建工程。
 6. 可创建空白工程。
 7. 可上传和下载工程 ZIP。
@@ -1198,12 +1178,12 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 13. Tavern Helper 脚本可用 Monaco/CodeMirror 编辑。
 14. 工具内不执行项目 JavaScript。
 15. 工具可进行 HTML/CSS 静态预览。
-16. 可在 ST 中进行真实 JavaScript 和前端运行测试。
-17. 可从 ST 单向拉取只读上下文快照。
-18. 工具不提供上下文文件上传或写回。
+16. 保存 preset 后可在 ST 中手动选择它，进行真实 JavaScript 和前端运行测试。
+17. 工具不把 REST 连接冒充页面运行时，不伪造最终 Prompt、token、DOM 或当前上下文捕获。
+18. 工具不提供角色、聊天、Persona、World Info 文件上传或写回。
 19. 自动保存只修改工程。
-20. preset 只能通过手动操作推送到 ST。
-21. 推送前构建、校验并显示目标差异。
+20. preset 只能通过手动操作保存到 ST，不自动切换已打开的 ST 页面。
+21. 保存前构建、校验、显示目标 revision/总体变化，并使用短时单次确认 token 防止内容/目标变化。
 22. 可导出带可选 version 和时间戳的 JSON。
 23. 未修改示例可完成语义无损 round-trip。
 24. 工具不保存 LLM API Key，也不实现模型请求客户端。
@@ -1213,13 +1193,11 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 
 ### 阶段 0：技术验证
 
-- 验证 ST 1.18.0 Bridge 扩展。
-- 验证当前 preset 读取。
-- 验证 preset 保存和激活。
-- 验证 Prompt 事件捕获。
-- 验证上下文摘要和 snapshot 拉取。
-- 验证渲染 DOM 静态快照。
-- 验证手机浏览器连接保持。
+- 验证 ST 1.18.x `/csrf-token`、用户登录、settings 和 preset API。
+- 验证无认证、Basic、多用户登录及组合认证。
+- 验证 Chat Completion preset 目录、指定读取和保存。
+- 验证 target policy、redirect、超时、响应体限额和敏感日志清理。
+- 验证 Cookie/CSRF 内存生命周期与手机浏览器的 HttpOnly 会话绑定。
 
 阶段 0 是后续开发的前置门槛。
 
@@ -1255,20 +1233,18 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 ### 阶段 4：ST 联调
 
 - 强制连接入口。
-- Bridge 状态和版本握手。
+- ST 内存会话、认证、兼容性和版本检查。
 - 从 ST preset 创建工程。
-- 单向上下文 snapshot。
-- 最终 Prompt 和 token 展示。
-- ST 静态 DOM 快照。
-- 在 ST 中查看。
+- preset 目录和指定读取。
+- 保存后引导用户在 ST 中刷新、手动选择和查看。
 
 ### 阶段 5：推送、验收与交付
 
-- 手动推送和应用。
-- 推送差异确认。
+- create/overwrite 手动保存。
+- revision/总体变化确认和单次 preview token。
 - 示例 golden 测试。
 - Docker Compose 文档。
-- Bridge 安装文档。
+- ST 直连、凭据生命周期和目标策略文档。
 - 使用手册。
 - 性能和响应式验收。
 
@@ -1276,15 +1252,16 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 
 | 风险 | 影响 | 第一版应对 |
 |---|---|---|
-| ST release 更新导致内部 API 变化 | Bridge 失效 | 固定 1.18.0 基线、版本握手、能力检查 |
-| 已有 ST 扩展环境差异 | 渲染结果不同 | 以用户真实 ST 为权威，工具只展示结果 |
-| 手机后台暂停页面/WebSocket | 调试中断 | 心跳、重连、明确要求 ST 页面保持可用 |
+| ST release 更新导致内部 API 变化 | preset 目录/保存失效 | 固定 1.18.x 基线、版本检查、wire contract 测试 |
+| Node 直连任意 URL 形成 SSRF | 内网服务或 metadata 暴露 | 默认回环+精确白名单；private 仅 RFC1918/ULA；始终拒绝 link-local/metadata；禁跨目标 redirect |
+| ST 凭据或会话泄露 | 账号或配置暴露 | 只存 Node 内存、opaque HttpOnly Cookie、日志/响应脱敏、空闲过期 |
+| 已有 ST 扩展环境差异 | 渲染结果不同 | 以用户在真实 ST 页面看到的结果为权威 |
 | 3 MB 级脚本编辑性能 | 页面卡顿或崩溃 | 懒加载、Worker、大文件模式、移动端 CodeMirror |
 | 8.8 MB JSON 整体序列化 | 导入/构建延迟 | Node/Worker 构建、进度状态、只保存变化文件 |
 | Regex 镜像不一致 | 导出覆盖数据 | 冲突诊断，不静默联动 |
 | 无鉴权部署在公网 | 数据泄露或被修改 | 明确仅可信网络，公网由部署者外加访问控制 |
-| ST 当前上下文与 snapshot 不一致 | 调试不可复现 | 哈希对比和过期提示 |
-| 工具静态预览与 ST 渲染差异 | 用户误判 | 明确标记预览类型，提供 ST 快照与真实查看 |
+| REST 无法读取已打开页面上下文/DOM | 工具内无法捕获真实运行结果 | 第一版明确只保存 preset，并引导用户在 ST 手动运行；不伪造数据 |
+| 工具静态预览与 ST 渲染差异 | 用户误判 | 明确标记本地预览非权威，以 ST 页面结果为准 |
 
 ## 34. 后续版本方向
 
@@ -1299,7 +1276,7 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - 国际化。
 - 无障碍完善。
 - 更多 preset 类型。
-- 更完整的 ST 扩展调试与网络面板。
+- 可选的 ST 页面集成、最终 Prompt/DOM/Console 捕获与网络面板。
 - 受控的 JavaScript 沙箱和权限报告。
 - 多用户、鉴权和公网部署。
 - 专用测试 ST 容器。
@@ -1312,7 +1289,6 @@ Bridge 可在 ST 完成消息渲染后拉取当前消息 DOM 快照：
 - SillyTavern 官方文档：https://docs.sillytavern.app/
 - Chat Completion 文档：https://docs.sillytavern.app/usage/api-connections/openai/
 - Tokenizer 文档：https://docs.sillytavern.app/usage/prompts/tokenizer/
-- UI Extension 文档：https://docs.sillytavern.app/for-contributors/writing-extensions/
 - World Info 文档：https://docs.sillytavern.app/usage/core-concepts/worldinfo/
 - Chat 文件文档：https://docs.sillytavern.app/usage/core-concepts/chatfilemanagement/
 - SillyTavern 1.18.0：https://github.com/SillyTavern/SillyTavern/releases/tag/1.18.0

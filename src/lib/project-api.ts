@@ -102,7 +102,7 @@ export interface CreateProjectInput {
 }
 
 export interface CreateProjectFromStInput {
-  connectionId: string;
+  presetName: string;
   name?: string;
   version?: string | null;
 }
@@ -699,8 +699,8 @@ export class ProjectApiClient implements ProjectApi {
     input: CreateProjectFromStInput,
     options: ProjectRequestOptions = {},
   ) {
-    if (!input.connectionId.trim()) {
-      throw new TypeError("connectionId must not be empty");
+    if (!input.presetName.trim()) {
+      throw new TypeError("presetName must not be empty");
     }
     const { payload } = await this.request(PROJECT_API_ENDPOINTS.createFromSt, {
       method: "POST",

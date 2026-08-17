@@ -14,7 +14,7 @@ import {
   Server,
 } from "lucide-react";
 
-import type { StConnection } from "../../lib/st-bridge-api";
+import type { StSession } from "../../lib/st-api";
 import type { SaveState } from "./workspace-editor-pane";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -33,8 +33,7 @@ interface WorkspaceTopBarProps {
   hasProject: boolean;
   saveState: SaveState;
   backendOnline: boolean;
-  stConnection: StConnection | null;
-  stContextLabel?: string;
+  stConnection: StSession | null;
   pushAvailable?: boolean;
   onToggleExplorer: () => void;
   onOpenProjects: () => void;
@@ -51,7 +50,6 @@ export function WorkspaceTopBar({
   saveState,
   backendOnline,
   stConnection,
-  stContextLabel,
   pushAvailable = false,
   onToggleExplorer,
   onOpenProjects,
@@ -113,13 +111,13 @@ export function WorkspaceTopBar({
           size="sm"
           className="hidden h-10 sm:inline-flex"
           onClick={onOpenConnection}
-          title={stConnected ? `ST ${stConnection.st.version} · ${stContextLabel ?? "无上下文摘要"}` : "打开 SillyTavern 配对"}
+          title={stConnected ? `ST ${stConnection.version ?? "未知版本"} · ${stConnection.origin}` : "连接 SillyTavern"}
         >
           <Radio className={stConnected ? "text-success" : "text-destructive"} />
           <span className="hidden max-w-44 flex-col items-start xl:flex">
-            <span>{stConnected ? `ST ${stConnection.st.version}` : "ST 未连接"}</span>
+            <span>{stConnected ? `ST ${stConnection.version ?? "已连接"}` : "ST 未连接"}</span>
             <span className="max-w-full truncate text-[9px] font-normal text-muted-foreground">
-              {stConnected ? (stContextLabel ?? `Bridge ${stConnection.bridgeVersion}`) : "点击查看配对"}
+              {stConnected ? stConnection.origin : "点击配置 HTTP 连接"}
             </span>
           </span>
         </Button>
@@ -154,11 +152,11 @@ export function WorkspaceTopBar({
           size="sm"
           onClick={onPush}
           disabled={!stConnected || !pushAvailable}
-          title={!pushAvailable ? "Preset 推送尚未实现" : undefined}
+          title={!stConnected ? "请先连接 SillyTavern" : !hasProject ? "请先打开工程" : undefined}
           className="hidden md:inline-flex"
         >
           <RadioTower />
-          推送至 ST
+          保存到 ST
         </Button>
 
         <DropdownMenu>
@@ -175,7 +173,7 @@ export function WorkspaceTopBar({
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onOpenConnection}>
               <Radio />
-              {stConnected ? `ST ${stConnection.st.version} 连接详情` : "连接 SillyTavern"}
+              {stConnected ? `ST ${stConnection.version ?? "已连接"} 连接详情` : "连接 SillyTavern"}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onExport} disabled={!hasProject}>
               <FileJson2 />
@@ -187,7 +185,7 @@ export function WorkspaceTopBar({
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onPush} disabled={!stConnected || !pushAvailable}>
               <RadioTower />
-              推送至 ST（待实现）
+              保存 Preset 到 ST
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

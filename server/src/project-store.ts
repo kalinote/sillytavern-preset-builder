@@ -25,6 +25,16 @@ import type {
 
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
 
+export interface ProjectBuildSnapshot {
+  manifest: ProjectManifest;
+  build: BuildResult;
+}
+
+export interface ProjectBuildTransactionResult<T> {
+  result: T;
+  targetPresetName?: string;
+}
+
 function toSummary(manifest: ProjectManifest): ProjectSummary {
   return {
     id: manifest.id,
@@ -352,10 +362,38 @@ export class ProjectStore {
   }
 
   async buildProject(projectId: string): Promise<BuildResult> {
+    return (await this.getProjectBuildSnapshot(projectId)).build;
+  }
+
+  async getProjectBuildSnapshot(projectId: string): Promise<ProjectBuildSnapshot> {
     const projectRoot = this.projectRoot(projectId);
     return this.withProjectLock(projectId, async () => {
-      await this.readManifest(projectRoot);
-      return buildPresetProject(projectRoot);
+      const manifest = await this.readManifest(projectRoot);
+      const build = await buildPresetProject(projectRoot);
+      return { manifest: structuredClone(manifest), build: structuredClone(build) };
+    });
+  }
+
+  async withProjectBuildTransaction<T>(
+    projectId: string,
+    operation: (snapshot: ProjectBuildSnapshot) => Promise<ProjectBuildTransactionResult<T>>,
+  ): Promise<T> {
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      const build = await buildPresetProject(projectRoot);
+      const transaction = await operation({
+        manifest: structuredClone(manifest),
+        build: structuredClone(build),
+      });
+      if (transaction.targetPresetName !== undefined) {
+        const targetPresetName = validateLabel(transaction.targetPresetName, "targetPresetName", 120);
+        if (!targetPresetName) throw new ApiError(400, "INVALID_INPUT", "targetPresetName must not be empty");
+        manifest.targetPresetName = targetPresetName;
+        manifest.updatedAt = new Date().toISOString();
+        await atomicWriteFile(join(projectRoot, "project.json"), stringifyJson(manifest as unknown as JsonObject));
+      }
+      return transaction.result;
     });
   }
 

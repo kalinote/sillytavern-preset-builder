@@ -8,7 +8,6 @@ interface MobileNavProps {
   value: MobileView;
   onChange: (value: MobileView) => void;
   connected: boolean;
-  runtimeAvailable?: boolean;
 }
 
 const items = [
@@ -18,7 +17,7 @@ const items = [
   { value: "runtime", label: "ST 调试", icon: RadioTower },
 ] as const;
 
-export function MobileNav({ value, onChange, connected, runtimeAvailable = false }: MobileNavProps) {
+export function MobileNav({ value, onChange, connected }: MobileNavProps) {
   return (
     <nav
       className="grid h-16 shrink-0 grid-cols-4 border-t border-border bg-surface px-1 pb-[env(safe-area-inset-bottom)] md:hidden"
@@ -27,18 +26,15 @@ export function MobileNav({ value, onChange, connected, runtimeAvailable = false
       {items.map((item) => {
         const Icon = item.icon;
         const active = item.value === value;
-        const disabled = item.value === "runtime" && !runtimeAvailable;
         return (
           <button
             key={item.value}
             type="button"
-            disabled={disabled}
-            title={disabled ? "ST 真实运行调试尚未实现" : undefined}
+            title={item.value === "runtime" ? "查看 SillyTavern 手动测试说明" : undefined}
             onClick={() => onChange(item.value)}
             className={cn(
               "relative flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg text-[10px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/30",
               active ? "text-primary" : "text-muted-foreground",
-              disabled && "opacity-45",
             )}
           >
             <span
@@ -54,7 +50,7 @@ export function MobileNav({ value, onChange, connected, runtimeAvailable = false
               <span
                 className={cn(
                   "absolute right-[calc(50%-17px)] top-2 size-1.5 rounded-full ring-2 ring-surface",
-                  runtimeAvailable && connected ? "bg-success" : "bg-warning",
+                  connected ? "bg-success" : "bg-warning",
                 )}
               />
             )}

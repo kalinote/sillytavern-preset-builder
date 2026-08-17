@@ -148,7 +148,7 @@ export function TopBar({
 
         <Button size="sm" onClick={onPushClick} className="hidden md:inline-flex">
           <RadioTower />
-          推送至 ST
+          保存到 ST
         </Button>
 
         <Tooltip>
@@ -184,7 +184,7 @@ export function TopBar({
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onPushClick}>
               <RadioTower />
-              推送至 ST
+              保存到 ST
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

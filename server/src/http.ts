@@ -3,11 +3,16 @@ import { access, readFile, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_ARCHIVE_LIMITS, type ArchiveLimits } from "./archive.js";
-import { BridgeManager, type BridgeManagerOptions } from "./bridge.js";
 import { ApiError, asApiError } from "./errors.js";
-import { buildExtensionArchive, EXTENSION_ARCHIVE_FILENAME } from "./extension-archive.js";
 import { isJsonObject } from "./json.js";
 import { ProjectStore } from "./project-store.js";
+import {
+  ST_SESSION_COOKIE,
+  StSessionManager,
+  type CreateStSessionInput,
+  type StSessionManagerOptions,
+} from "./st-session-manager.js";
+import { parseStAllowedOrigins, parseStTargetPolicy } from "./st-http-client.js";
 import type { ImportProjectInput, JsonObject } from "./types.js";
 
 const DEFAULT_BODY_LIMIT = 64 * 1024 * 1024;
@@ -20,8 +25,7 @@ export interface ApiServerOptions {
   archiveLimits?: Partial<ArchiveLimits>;
   allowedOrigins?: string[];
   exposeWorkspacePath?: boolean;
-  bridgeOptions?: Partial<BridgeManagerOptions>;
-  extensionRoot?: string;
+  stSessionOptions?: Partial<StSessionManagerOptions>;
 }
 
 interface MultipartPart {
@@ -31,7 +35,7 @@ interface MultipartPart {
   data: Buffer;
 }
 
-const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "OPTIONS"] as const;
+const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] as const;
 const CORS_HEADERS = ["content-type", "if-match", "x-project-name", "x-project-version"] as const;
 
 function addVary(response: ServerResponse, value: string): void {
@@ -321,6 +325,78 @@ function positiveEnvironmentNumber(name: string, fallback: number, multiplier = 
   return Number.isFinite(value) && value > 0 ? Math.floor(value * multiplier) : fallback;
 }
 
+function cookieValue(request: IncomingMessage, name: string): string | undefined {
+  const header = request.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    const value = part.slice(separator + 1).trim();
+    return value || undefined;
+  }
+  return undefined;
+}
+
+function isSecureRequest(request: IncomingMessage): boolean {
+  if ("encrypted" in request.socket && request.socket.encrypted === true) return true;
+  const forwarded = request.headers["x-forwarded-proto"];
+  return (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim().toLowerCase() === "https";
+}
+
+function setStSessionCookie(response: ServerResponse, request: IncomingMessage, token: string): void {
+  response.setHeader(
+    "Set-Cookie",
+    `${ST_SESSION_COOKIE}=${token}; Path=/api; HttpOnly; SameSite=Strict${isSecureRequest(request) ? "; Secure" : ""}`,
+  );
+}
+
+function clearStSessionCookie(response: ServerResponse, request: IncomingMessage): void {
+  response.setHeader(
+    "Set-Cookie",
+    `${ST_SESSION_COOKIE}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0${isSecureRequest(request) ? "; Secure" : ""}`,
+  );
+}
+
+function secretString(value: unknown, field: string, maxLength = 1024): string {
+  if (typeof value !== "string" || !value || value.length > maxLength) {
+    throw new ApiError(400, "INVALID_INPUT", `${field} must be a non-empty string of at most ${maxLength} characters`);
+  }
+  return value;
+}
+
+function secretPassword(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length > 4096) {
+    throw new ApiError(400, "INVALID_INPUT", `${field} must be a string of at most 4096 characters`);
+  }
+  return value;
+}
+
+function parseStSessionInput(value: unknown): CreateStSessionInput {
+  if (!isJsonObject(value)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+  const origin = secretString(value.origin, "origin", 2048);
+  let basicAuth: CreateStSessionInput["basicAuth"];
+  if (value.basicAuth !== undefined) {
+    if (!isJsonObject(value.basicAuth)) throw new ApiError(400, "INVALID_INPUT", "basicAuth must be an object");
+    basicAuth = {
+      username: secretString(value.basicAuth.username, "basicAuth.username", 256),
+      password: secretPassword(value.basicAuth.password, "basicAuth.password"),
+    };
+  }
+  let accountAuth: CreateStSessionInput["accountAuth"];
+  if (value.accountAuth !== undefined) {
+    if (!isJsonObject(value.accountAuth)) throw new ApiError(400, "INVALID_INPUT", "accountAuth must be an object");
+    accountAuth = {
+      handle: secretString(value.accountAuth.handle, "accountAuth.handle", 256),
+      password: secretPassword(value.accountAuth.password, "accountAuth.password"),
+    };
+  }
+  return {
+    origin,
+    ...(basicAuth === undefined ? {} : { basicAuth }),
+    ...(accountAuth === undefined ? {} : { accountAuth }),
+  };
+}
+
 function mimeType(path: string): string {
   switch (extname(path).toLowerCase()) {
     case ".html": return "text/html; charset=utf-8";
@@ -379,12 +455,11 @@ async function serveStatic(
 export function createApiServer(options: ApiServerOptions = {}): {
   server: Server;
   store: ProjectStore;
-  bridge: BridgeManager;
+  stSessions: StSessionManager;
 } {
   const workspaceRoot = options.workspaceRoot ?? process.env.PRESET_STUDIO_WORKSPACE ?? join(REPOSITORY_ROOT, "workspace-data");
   const bodyLimit = options.bodyLimitBytes ?? DEFAULT_BODY_LIMIT;
   const staticRoot = options.staticRoot ?? process.env.PRESET_STUDIO_STATIC_ROOT ?? join(REPOSITORY_ROOT, "dist");
-  const extensionRoot = options.extensionRoot ?? join(REPOSITORY_ROOT, "sillytavern-extension");
   const environmentArchiveLimits: ArchiveLimits = {
     maxArchiveBytes: positiveEnvironmentNumber(
       "PRESET_STUDIO_ZIP_MAX_MIB",
@@ -407,22 +482,23 @@ export function createApiServer(options: ApiServerOptions = {}): {
   const allowedOrigins = configuredOrigins(options);
   const exposeWorkspacePath = options.exposeWorkspacePath
     ?? process.env.PRESET_STUDIO_EXPOSE_WORKSPACE_PATH?.toLowerCase() === "true";
-  const environmentBridgeOptions: Partial<BridgeManagerOptions> = {
-    // positiveEnvironmentNumber only applies the multiplier to configured
-    // values, so fallbacks are already expressed in their target units.
-    pairingTtlMs: positiveEnvironmentNumber("PRESET_STUDIO_PAIRING_TTL_SECONDS", 300_000, 1000),
-    resumeTtlMs: positiveEnvironmentNumber("PRESET_STUDIO_BRIDGE_RESUME_TTL_SECONDS", 1_800_000, 1000),
-    helloTimeoutMs: positiveEnvironmentNumber("PRESET_STUDIO_BRIDGE_HELLO_TIMEOUT_SECONDS", 10_000, 1000),
-    heartbeatIntervalMs: positiveEnvironmentNumber("PRESET_STUDIO_BRIDGE_HEARTBEAT_SECONDS", 15_000, 1000),
-    heartbeatTimeoutMs: positiveEnvironmentNumber("PRESET_STUDIO_BRIDGE_HEARTBEAT_TIMEOUT_SECONDS", 45_000, 1000),
-    rpcTimeoutMs: positiveEnvironmentNumber("PRESET_STUDIO_BRIDGE_RPC_TIMEOUT_SECONDS", 30_000, 1000),
-    maxMessageBytes: positiveEnvironmentNumber(
-      "PRESET_STUDIO_BRIDGE_MAX_MESSAGE_MIB",
-      32 * 1024 * 1024,
+  const environmentStOptions: StSessionManagerOptions = {
+    targetPolicy: parseStTargetPolicy(process.env.PRESET_STUDIO_ST_TARGET_POLICY),
+    allowedOrigins: parseStAllowedOrigins(process.env.PRESET_STUDIO_ST_ALLOWED_ORIGINS),
+    connectTimeoutMs: positiveEnvironmentNumber("PRESET_STUDIO_ST_CONNECT_TIMEOUT_MS", 10_000),
+    requestTimeoutMs: positiveEnvironmentNumber("PRESET_STUDIO_ST_REQUEST_TIMEOUT_MS", 30_000),
+    responseLimitBytes: positiveEnvironmentNumber(
+      "PRESET_STUDIO_ST_RESPONSE_LIMIT_MIB",
+      64 * 1024 * 1024,
       1024 * 1024,
     ),
+    sessionIdleMs: positiveEnvironmentNumber(
+      "PRESET_STUDIO_ST_SESSION_IDLE_MINUTES",
+      480 * 60_000,
+      60_000,
+    ),
   };
-  let bridge!: BridgeManager;
+  const stSessions = new StSessionManager(store, { ...environmentStOptions, ...options.stSessionOptions });
 
   const server = createServer(async (request, response) => {
     setCommonHeaders(response);
@@ -441,29 +517,47 @@ export function createApiServer(options: ApiServerOptions = {}): {
         });
         return;
       }
-      if (pathname === "/api/st/pairing" && request.method === "POST") {
-        const pairingBody = await readRequestBody(request, 16 * 1024);
-        if (pairingBody.length > 0 && !isJsonObject(parseJsonBuffer(pairingBody))) {
-          throw new ApiError(400, "INVALID_INPUT", "Pairing request body must be an object when provided");
+      if (pathname === "/api/st/session" && request.method === "GET") {
+        const token = cookieValue(request, ST_SESSION_COOKIE);
+        const session = stSessions.getSession(token);
+        if (token && !session) clearStSessionCookie(response, request);
+        sendJson(response, 200, { session });
+        return;
+      }
+      if (pathname === "/api/st/session" && request.method === "POST") {
+        const input = parseStSessionInput(parseJsonBuffer(await readRequestBody(request, 16 * 1024)));
+        const created = await stSessions.createSession(input);
+        const previousToken = cookieValue(request, ST_SESSION_COOKIE);
+        if (previousToken) stSessions.destroySession(previousToken);
+        setStSessionCookie(response, request, created.token);
+        sendJson(response, 201, { session: created.session });
+        return;
+      }
+      if (pathname === "/api/st/session/check" && request.method === "POST") {
+        const body = await readRequestBody(request, 16 * 1024);
+        if (body.length > 0 && !isJsonObject(parseJsonBuffer(body))) {
+          throw new ApiError(400, "INVALID_INPUT", "Session check body must be an object when provided");
         }
-        sendJson(response, 201, bridge.createPairing());
+        const session = await stSessions.checkSession(cookieValue(request, ST_SESSION_COOKIE));
+        sendJson(response, 200, { session });
         return;
       }
-      if (pathname === "/api/st/extension/archive" && request.method === "GET") {
-        const archive = await buildExtensionArchive(extensionRoot);
-        response.statusCode = 200;
-        response.setHeader("Content-Type", "application/zip");
-        response.setHeader("Content-Length", archive.length);
-        response.setHeader(
-          "Content-Disposition",
-          `attachment; filename*=UTF-8''${encodeURIComponent(EXTENSION_ARCHIVE_FILENAME)}`,
-        );
+      if (pathname === "/api/st/session" && request.method === "DELETE") {
+        stSessions.destroySession(cookieValue(request, ST_SESSION_COOKIE));
+        clearStSessionCookie(response, request);
+        response.statusCode = 204;
         response.setHeader("Cache-Control", "no-store");
-        response.end(archive);
+        response.end();
         return;
       }
-      if (pathname === "/api/st/connections" && request.method === "GET") {
-        sendJson(response, 200, { connections: bridge.listConnections() });
+      if (pathname === "/api/st/presets" && request.method === "GET") {
+        sendJson(response, 200, await stSessions.listPresets(cookieValue(request, ST_SESSION_COOKIE)));
+        return;
+      }
+      if (pathname === "/api/st/presets/read" && request.method === "POST") {
+        const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        sendJson(response, 200, await stSessions.readPreset(cookieValue(request, ST_SESSION_COOKIE), body.name));
         return;
       }
       if (pathname === "/api/projects" && request.method === "GET") {
@@ -501,34 +595,40 @@ export function createApiServer(options: ApiServerOptions = {}): {
         return;
       }
       if (pathname === "/api/projects/create-from-st" && request.method === "POST") {
-        const body = parseJsonBuffer(await readRequestBody(request, bodyLimit));
-        if (!isJsonObject(body) || typeof body.connectionId !== "string" || !body.connectionId) {
-          throw new ApiError(400, "INVALID_INPUT", "connectionId is required");
-        }
-        const rpcResult = await bridge.request(body.connectionId, "preset.pull", {});
-        if (
-          !isJsonObject(rpcResult) ||
-          typeof rpcResult.name !== "string" ||
-          rpcResult.name.trim().length === 0 ||
-          rpcResult.name.length > 120 ||
-          !isJsonObject(rpcResult.preset)
-        ) {
-          throw new ApiError(502, "RPC_INVALID_PRESET", "preset.pull returned an invalid name or preset object");
-        }
-        const connection = bridge.listConnections().find((item) => item.connectionId === body.connectionId);
-        const sourcePresetName = rpcResult.name.trim();
-        const project = await store.importProject({
-          preset: rpcResult.preset,
-          sourceType: "sillytavern",
-          sourcePresetName,
-          ...(connection?.st.version ? { sourceStVersion: connection.st.version } : {}),
+        const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        const result = await stSessions.createProjectFromSt(cookieValue(request, ST_SESSION_COOKIE), {
+          presetName: body.presetName,
           ...(typeof body.name === "string" ? { name: body.name } : {}),
           ...(typeof body.version === "string" ? { version: body.version } : {}),
         });
-        sendJson(response, 201, {
-          project,
-          source: { connectionId: body.connectionId, presetName: sourcePresetName },
-        });
+        sendJson(response, 201, result);
+        return;
+      }
+
+      const pushPreviewMatch = /^\/api\/projects\/([^/]+)\/push-preview$/.exec(pathname);
+      if (pushPreviewMatch && request.method === "POST") {
+        const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        const preview = await stSessions.previewPush(
+          cookieValue(request, ST_SESSION_COOKIE),
+          pushPreviewMatch[1] as string,
+          { targetName: body.targetName, mode: body.mode },
+        );
+        sendJson(response, 200, preview);
+        return;
+      }
+
+      const pushPresetMatch = /^\/api\/projects\/([^/]+)\/push-preset$/.exec(pathname);
+      if (pushPresetMatch && request.method === "POST") {
+        const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        const result = await stSessions.commitPush(
+          cookieValue(request, ST_SESSION_COOKIE),
+          pushPresetMatch[1] as string,
+          body.previewToken,
+        );
+        sendJson(response, 200, result);
         return;
       }
 
@@ -622,6 +722,6 @@ export function createApiServer(options: ApiServerOptions = {}): {
     }
   });
 
-  bridge = new BridgeManager(server, { ...environmentBridgeOptions, ...options.bridgeOptions });
-  return { server, store, bridge };
+  server.on("close", () => stSessions.close());
+  return { server, store, stSessions };
 }

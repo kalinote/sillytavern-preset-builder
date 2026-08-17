@@ -10,13 +10,12 @@ import {
 import { toast } from "sonner";
 
 import { ConnectionDialog } from "./components/app/connection-dialog";
-import { ConnectionGate } from "./components/app/connection-gate";
 import { MobileNav, type MobileView } from "./components/app/mobile-nav";
+import { PushDialog } from "./components/app/push-dialog";
 import { DESKTOP_EDITOR_QUERY } from "./components/editor";
 import {
   ProjectManagerDialog,
   type ProjectChoice,
-  type StProjectSourceChoice,
 } from "./components/workspace/project-manager-dialog";
 import { ProjectEmptyState } from "./components/workspace/project-empty-state";
 import {
@@ -33,22 +32,17 @@ import { WorkspaceTopBar } from "./components/workspace/workspace-top-bar";
 import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { useProjectWorkspace } from "./hooks/use-project-workspace";
-import { useStBridge } from "./hooks/use-st-bridge";
+import { useStConnection } from "./hooks/use-st-connection";
+import { runSafely } from "./lib/async";
 import type { ProjectExportResult } from "./lib/project-api";
-import { StBridgeApiError } from "./lib/st-bridge-api";
 
 export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
-  const bridge = useStBridge({
+  const st = useStConnection({
     enabled: backendOnline,
-    onError: (error) => {
-      if (error instanceof StBridgeApiError && error.status === 0) {
-        setBackendOnline(false);
-      }
-    },
   });
   const workspace = useProjectWorkspace({
-    autoLoad: Boolean(bridge.activeConnection),
+    autoLoad: backendOnline,
     autosaveDelay: 850,
     onError: (error) => {
       if (!error.message.includes("project service")) {
@@ -58,6 +52,7 @@ export default function App() {
   });
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [connectionDialogOpen, setConnectionDialogOpen] = useState(false);
+  const [pushDialogOpen, setPushDialogOpen] = useState(false);
   const [explorerVisible, setExplorerVisible] = useState(true);
   const [inspectorVisible, setInspectorVisible] = useState(true);
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
@@ -100,15 +95,16 @@ export default function App() {
       });
       return;
     }
-    try {
-      const connections = await bridge.refreshConnections();
-      if (!connections.some((connection) => connection.status === "connected")) return;
-      const projects = await workspace.refreshProjects();
-      if (!workspace.project && projects[0]) {
-        await workspace.openProject(projects[0].id);
-      }
-    } catch {
-      // Hook already exposes the detailed error.
+    const [, projectsResult] = await Promise.allSettled([
+      st.refreshSession(),
+      workspace.refreshProjects(),
+    ]);
+    if (
+      projectsResult.status === "fulfilled" &&
+      !workspace.project &&
+      projectsResult.value[0]
+    ) {
+      await workspace.openProject(projectsResult.value[0].id);
     }
   };
 
@@ -123,19 +119,6 @@ export default function App() {
       })),
     [workspace.projects],
   );
-  const stProjectSources = useMemo<StProjectSourceChoice[]>(
-    () =>
-      bridge.connectedConnections.map((connection) => ({
-        connectionId: connection.connectionId,
-        stVersion: connection.st.version,
-        bridgeVersion: connection.bridgeVersion,
-        presetName: contextString(connection.context, "currentPresetName") ?? undefined,
-        contextLabel: stContextSummary(connection.context) || undefined,
-      })),
-    [bridge.connectedConnections],
-  );
-  const stContextLabel = stContextSummary(bridge.activeConnection?.context);
-
   const mappedSaveState: SaveState =
     workspace.saveState === "saving"
       ? "saving"
@@ -200,12 +183,11 @@ export default function App() {
     [workspace.files],
   );
   const openProjectManager = useCallback(() => {
-    if (!bridge.activeConnection) {
-      setConnectionDialogOpen(true);
-      return;
-    }
     setProjectDialogOpen(true);
-  }, [bridge.activeConnection]);
+    if (st.session?.status === "connected" && !st.catalog) {
+      void st.refreshPresets().catch(() => undefined);
+    }
+  }, [st.catalog, st.refreshPresets, st.session?.status]);
   const selectWorkspaceFile = workspace.selectFile;
   const handleDesktopFileSelect = useCallback(
     (path: string) => {
@@ -234,41 +216,31 @@ export default function App() {
           hasProject={Boolean(workspace.project)}
           saveState={mappedSaveState}
           backendOnline={backendOnline}
-          stConnection={bridge.activeConnection}
-          stContextLabel={stContextLabel || undefined}
-          pushAvailable={false}
+          stConnection={st.session}
+          pushAvailable={Boolean(backendOnline && workspace.project && st.session?.status === "connected")}
           onToggleExplorer={() => setExplorerVisible((value) => !value)}
           onOpenProjects={openProjectManager}
           onOpenConnection={() => setConnectionDialogOpen(true)}
           onExport={() => void handleExport()}
           onDownloadProject={() => void handleDownloadProject()}
           onPush={() => {
-            toast.info("Preset 推送尚未实现", {
-              description: "Bridge v1 当前只支持连接状态与从 ST 当前 preset 创建工程。",
-            });
+            if (st.session?.status !== "connected") {
+              setConnectionDialogOpen(true);
+              return;
+            }
+            setPushDialogOpen(true);
           }}
         />
 
-        {!backendOnline || !bridge.activeConnection ? (
-          <ConnectionGate
-            backendOnline={backendOnline}
-            pairing={bridge.pairing}
-            isPairing={bridge.isPairing}
-            isDownloadingExtension={bridge.isDownloadingExtension}
-            isCheckingConnections={bridge.isLoading}
-            error={bridge.error?.message}
-            onCreatePairing={bridge.createPairing}
-            onDownloadExtension={bridge.downloadExtensionArchive}
-            onRetryBackend={retryBackend}
-            onRetryConnections={bridge.retry}
-          />
-        ) : !workspace.project ? (
+        {!backendOnline || !workspace.project ? (
           <ProjectEmptyState
             backendOnline={backendOnline}
+            stConnected={st.session?.status === "connected"}
             loading={workspace.isLoading || operationBusy}
             error={workspace.error?.message}
             onOpenProjects={openProjectManager}
-            onRetry={() => void retryBackend()}
+            onOpenConnection={() => setConnectionDialogOpen(true)}
+            onRetry={() => runSafely(retryBackend)}
           />
         ) : !workspace.activeFile ? (
           <WorkspaceLoading
@@ -409,7 +381,7 @@ export default function App() {
                   initialTab="preview"
                 />
               )}
-              {mobileView === "runtime" && <RuntimeUnavailable />}
+              {mobileView === "runtime" && <RuntimeUnavailable stOrigin={st.session?.origin} />}
               </div>
             )}
 
@@ -417,8 +389,7 @@ export default function App() {
               <MobileNav
                 value={mobileView}
                 onChange={setMobileView}
-                connected={Boolean(bridge.activeConnection)}
-                runtimeAvailable={false}
+                connected={st.session?.status === "connected"}
               />
             )}
           </>
@@ -431,7 +402,9 @@ export default function App() {
           activeProjectId={workspace.project?.id}
           busy={operationBusy || workspace.isLoading}
           error={workspace.error?.message}
-          stConnections={stProjectSources}
+          stSession={st.session}
+          stCatalog={st.catalog}
+          isLoadingStPresets={st.operation === "catalog"}
           onSelect={(projectId) =>
             runOperation(async () => {
               await workspace.openProject(projectId);
@@ -465,28 +438,59 @@ export default function App() {
           onCreateFromSt={(input) =>
             runOperation(async () => {
               await workspace.createProjectFromSt(input);
-              await bridge.refreshConnections();
               setProjectDialogOpen(false);
-            }, "已从 ST 当前 preset 创建工程快照")
+            }, `已从 ST preset“${input.presetName}”创建工程快照`)
           }
+          onRefreshStPresets={st.refreshPresets}
+          onOpenStConnection={() => {
+            setProjectDialogOpen(false);
+            setConnectionDialogOpen(true);
+          }}
         />
 
         <ConnectionDialog
           open={connectionDialogOpen}
           onOpenChange={setConnectionDialogOpen}
-          activeConnection={bridge.activeConnection}
-          connections={bridge.connections}
-          pairing={bridge.pairing}
+          session={st.session}
+          rememberedOrigin={st.rememberedOrigin}
           backendOnline={backendOnline}
-          isLoading={bridge.isLoading}
-          isPairing={bridge.isPairing}
-          isDownloadingExtension={bridge.isDownloadingExtension}
-          error={bridge.error?.message}
-          onRefresh={bridge.refreshConnections}
-          onCreatePairing={bridge.createPairing}
-          onDownloadExtension={bridge.downloadExtensionArchive}
+          operation={st.operation}
+          isRefreshing={st.isRefreshingSession}
+          error={st.error?.message}
+          onConnect={st.connectSession}
+          onRefresh={st.refreshSession}
+          onCheck={st.checkSession}
+          onDisconnect={st.disconnectSession}
           onRetryBackend={retryBackend}
         />
+
+        {workspace.project && pushDialogOpen ? (
+          <PushDialog
+            key={workspace.project.id}
+            open={pushDialogOpen}
+            onOpenChange={setPushDialogOpen}
+            projectId={workspace.project.id}
+            defaultTargetName={
+              workspace.project.targetPresetName ??
+              workspace.project.sourcePresetName ??
+              workspace.project.name
+            }
+            presetNames={st.presets.map((preset) => preset.name)}
+            operation={st.operation}
+            onPreview={async (projectId, input) => {
+              await workspace.flushSave();
+              return st.previewProjectPush(projectId, input);
+            }}
+            onCommit={async (projectId, previewToken) => {
+              const result = await st.commitProjectPush(projectId, previewToken);
+              await Promise.allSettled([
+                st.refreshPresets(),
+                workspace.openProject(projectId),
+              ]);
+              return result;
+            }}
+          />
+        ) : null}
       </div>
     </TooltipProvider>
   );
@@ -522,35 +526,27 @@ function WorkspaceLoading({
   );
 }
 
-function RuntimeUnavailable() {
+function RuntimeUnavailable({ stOrigin }: { stOrigin?: string }) {
   return (
     <main className="flex min-h-0 flex-1 items-center justify-center bg-background p-6">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 text-center shadow-sm">
         <span className="mx-auto flex size-11 items-center justify-center rounded-xl bg-muted text-muted-foreground">
           <RadioTower className="size-5" />
         </span>
-        <p className="mt-4 text-sm font-medium">ST 真实运行调试尚未实现</p>
+        <p className="mt-4 text-sm font-medium">请在 SillyTavern 中手动测试</p>
         <p className="mt-2 text-xs leading-5 text-muted-foreground">
-          Bridge v1 当前只接通连接状态和 preset 快照拉取；这里不会显示模拟运行数据。
+          HTTP 连接可以读取和保存 preset，但不能控制已经打开的 ST 页面、捕获最终 Prompt 或执行页面 JavaScript。保存后请刷新 ST、手动选择目标 preset，再发起测试对话。
         </p>
+        {stOrigin ? (
+          <Button asChild variant="secondary" className="mt-4">
+            <a href={stOrigin} target="_blank" rel="noreferrer">
+              打开 SillyTavern
+            </a>
+          </Button>
+        ) : null}
       </div>
     </main>
   );
-}
-
-function contextString(context: Record<string, unknown> | null | undefined, key: string) {
-  const value = context?.[key];
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function stContextSummary(context: Record<string, unknown> | null | undefined) {
-  const presetName = contextString(context, "currentPresetName");
-  const characterName = contextString(context, "characterName");
-  const personaName = contextString(context, "personaName");
-  const chatId = contextString(context, "chatId");
-  return [presetName, characterName, personaName, chatId]
-    .filter((value): value is string => Boolean(value))
-    .join(" / ");
 }
 
 function triggerExportDownload(result: ProjectExportResult) {

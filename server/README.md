@@ -1,137 +1,195 @@
 # Preset Studio 工程后端
 
-第一版工程内核使用 Node.js 原生 HTTP、WebSocket 与文件系统 API，不依赖数据库。ZIP 工程包使用无传递依赖的 `fflate`，SillyTavern Bridge 使用 `ws`。工程根目录由 `PRESET_STUDIO_WORKSPACE` 指定；未设置时使用仓库根目录下的 `workspace-data/`。
+第一版工程后端使用 Node.js 原生 HTTP 与文件系统 API，不依赖数据库。它同时提供工程存储 API、生产前端静态文件，以及到用户已有 SillyTavern 的受限服务端 HTTP 客户端；连接不要求向 SillyTavern 安装任何额外组件。
 
 ## 启动
 
-~~~bash
+```bash
 pnpm --dir server install
 pnpm --dir server dev
-~~~
+```
 
-默认只监听 `127.0.0.1:3001`。第一版没有鉴权，不会在裸 Node 启动时默认暴露到局域网；Docker 部署应显式设置 `HOST=0.0.0.0`。生产构建与启动：
+默认只监听 `127.0.0.1:3001`。生产构建与启动：
 
-~~~bash
+```bash
 pnpm --dir server build
 pnpm --dir server start
-~~~
+```
 
-可用环境变量：
+工程根目录由 `PRESET_STUDIO_WORKSPACE` 指定；未设置时使用仓库根目录下的 `workspace-data/`。ZIP 工程包使用 `fflate`。
+
+## 环境变量
+
+### 服务与工程
 
 - `PORT`：HTTP 端口，默认 `3001`。
 - `HOST`：监听地址，默认 `127.0.0.1`。
 - `PRESET_STUDIO_WORKSPACE`：工程工作区绝对或相对路径。
-- `PRESET_STUDIO_BODY_LIMIT_MIB`：请求体上限，默认 `64` MiB。
 - `PRESET_STUDIO_STATIC_ROOT`：生产前端目录；默认自动寻找仓库根目录的 `dist/`。
+- `PRESET_STUDIO_BODY_LIMIT_MIB`：JSON 请求体上限，默认 `64` MiB。
 - `PRESET_STUDIO_ZIP_MAX_MIB`：ZIP 压缩体积上限，默认 `64` MiB。
 - `PRESET_STUDIO_ZIP_UNPACKED_MIB`：ZIP 解压总大小上限，默认 `256` MiB。
 - `PRESET_STUDIO_ZIP_FILE_MIB`：ZIP 单文件解压大小上限，默认 `128` MiB。
 - `PRESET_STUDIO_ZIP_MAX_ENTRIES`：ZIP 文件和目录条目上限，默认 `10000`。
-- `PRESET_STUDIO_ALLOWED_ORIGINS`：允许直接跨源访问 API 的 HTTP(S) Origin，多个值用英文逗号分隔；默认空，仅允许同源浏览器请求。
+- `PRESET_STUDIO_ALLOWED_ORIGINS`：允许直接跨源访问 Studio API 的 HTTP(S) Origin，多个值用英文逗号分隔；默认空，只允许同源浏览器请求。
 - `PRESET_STUDIO_EXPOSE_WORKSPACE_PATH`：设为 `true` 时才在 `/api/health` 返回工作区绝对路径，默认 `false`。
-- `PRESET_STUDIO_PAIRING_TTL_SECONDS`：Bridge 一次性配对码有效期，默认 `300` 秒。
-- `PRESET_STUDIO_BRIDGE_RESUME_TTL_SECONDS`：Bridge 断线后可恢复时长，默认 `1800` 秒。
-- `PRESET_STUDIO_BRIDGE_HELLO_TIMEOUT_SECONDS`：WebSocket 首包等待时间，默认 `10` 秒。
-- `PRESET_STUDIO_BRIDGE_HEARTBEAT_SECONDS`：Bridge JSON 心跳间隔，默认 `15` 秒。
-- `PRESET_STUDIO_BRIDGE_HEARTBEAT_TIMEOUT_SECONDS`：无有效 pong 的断线判定时间，默认 `45` 秒。
-- `PRESET_STUDIO_BRIDGE_RPC_TIMEOUT_SECONDS`：`preset.pull` 调用超时，默认 `30` 秒。
-- `PRESET_STUDIO_BRIDGE_MAX_MESSAGE_MIB`：单条 WebSocket 消息上限，默认 `32` MiB。
 
-生产依赖 `fflate` 与 `ws`；开发阶段另需 `tsx`、`typescript`、`@types/node` 与 `@types/ws`，均已列在 `server/package.json`。容器运行编译后的 `server/dist` 时也必须复制生产 `server/node_modules`，不能只复制 JavaScript 输出。
+### SillyTavern 直连
 
-## Origin 与本地访问边界
+- `PRESET_STUDIO_ST_TARGET_POLICY`：ST 目标策略，取值 `allowlist`、`private` 或 `any`，默认 `allowlist`。
+- `PRESET_STUDIO_ST_ALLOWED_ORIGINS`：精确允许的 ST HTTP(S) Origin，逗号分隔；默认空。
+- `PRESET_STUDIO_ST_CONNECT_TIMEOUT_MS`：建立 ST 网络连接的超时，默认 `10000` ms。
+- `PRESET_STUDIO_ST_REQUEST_TIMEOUT_MS`：单次 ST 请求的总超时，默认 `30000` ms。
+- `PRESET_STUDIO_ST_RESPONSE_LIMIT_MIB`：单个 ST 响应体上限，默认 `64` MiB。
+- `PRESET_STUDIO_ST_SESSION_IDLE_MINUTES`：内存连接会话空闲过期时间，默认 `480` 分钟。
+
+目标策略的含义：
+
+- `allowlist`：始终允许回环 Origin，并允许 `PRESET_STUDIO_ST_ALLOWED_ORIGINS` 中逐项精确匹配的 Origin。这是默认值。
+- `private`：允许回环、IPv4 RFC1918 和 IPv6 ULA 目标，适合容器连接可信 LAN 中的 ST。
+- `any`：允许任意 HTTP(S) Origin。必须显式配置，只能在完全可信的网络中使用。
+
+目标只接受规范化的 HTTP(S) Origin，不把路径、查询、片段或 URL 用户信息作为连接目标。`169.254/16`、`fe80::/10` 等 link-local、unspecified、multicast/reserved 和云 metadata 地址在所有策略（包括显式 allowlist 和 `any`）下始终拒绝。每次 ST 请求都重新解析 DNS、校验所有结果并把本次连接固定到已校验地址；任何重定向都拒绝。请求同时受连接超时、总超时和响应体大小限制。`private`/`any` 会扩大服务端请求能力；Preset Studio 自身又没有用户鉴权，因此不得直接暴露公网。
+
+## Origin 与浏览器访问边界
 
 服务端默认不发送通配 CORS，也不会回显任意 Origin：
 
 - 没有 `Origin` 的 CLI、Docker healthcheck 和服务间请求保持可用。
-- 浏览器直接访问生产服务时，只允许与有效请求 Host/Protocol 相同的 Origin。
-- Vite 或同源反向代理转发时，浏览器的 `Sec-Fetch-Site: same-origin` 可证明该请求对浏览器仍是同源；因此使用 `/api` 代理的 4173/4174 开发页面不需要额外 CORS 配置。
-- 必须从另一个 Origin 直接请求 API 时，应精确配置 `PRESET_STUDIO_ALLOWED_ORIGINS`，例如：
-
-~~~text
-PRESET_STUDIO_ALLOWED_ORIGINS=http://localhost:4174,https://studio.example.com
-~~~
-
+- 浏览器访问生产服务时，只允许与有效请求 Host/Protocol 相同的 Origin。
+- Vite 或同源反向代理转发时，浏览器仍通过 `/api` 同源访问，不需要额外 CORS 配置。
+- 仅对无 ST 会话的工程 API/CLI 场景，如确需从另一个 Origin 直接请求 Studio API，可精确设置 `PRESET_STUDIO_ALLOWED_ORIGINS`，例如 `http://localhost:4174,https://studio.example.com`。
 - 不可信 Origin 的普通请求、非简单请求和 preflight 均返回 `403 ORIGIN_NOT_ALLOWED`。不支持 `*`、路径、用户信息或非 HTTP(S) Origin。
-- 反向代理终止 HTTPS 时应保留原始 `Host` 并设置 `X-Forwarded-Proto: https`；否则应显式配置外部 Origin。
+- 反向代理终止 HTTPS 时应保留原始 `Host` 并设置 `X-Forwarded-Proto: https`，否则显式配置外部 Origin。
 
-Origin 校验是本地无鉴权版本的浏览器侧最低边界，不等同于账号认证。服务仍不应直接暴露公网。
+ST 会话 Cookie 是 `SameSite=Strict`，前端请求使用 `credentials: "same-origin"`；因此使用 ST 连接能力时，UI 与 `/api` 必须同源。开发环境通过 Vite `/api` proxy 满足这一点；生产分离托管时必须把 `/api` 反向代理到与 UI 相同的 Origin。CORS 白名单不能替代同源反代，也不能用于跨站携带 ST 会话。
 
-## API
+`PRESET_STUDIO_ALLOWED_ORIGINS` 控制无会话 API 的浏览器跨源边界；`PRESET_STUDIO_ST_ALLOWED_ORIGINS` 控制 Studio Node 能连接哪些 ST。两者用途不同，不能互相替代。Origin 校验也不等同于用户认证。
+
+## REST API
+
+### SillyTavern 会话与 presets
+
+| 方法 | 路由 | 说明 |
+| --- | --- | --- |
+| GET | `/api/st/session` | 读取当前浏览器对应的内存 ST 会话摘要 |
+| POST | `/api/st/session` | 验证目标、登录 ST 并创建/替换当前会话 |
+| DELETE | `/api/st/session` | 删除当前会话，成功返回 `204` |
+| POST | `/api/st/session/check` | 主动检查当前会话和 ST 兼容性 |
+| GET | `/api/st/presets` | 列出 Chat Completion presets |
+| POST | `/api/st/presets/read` | 读取 `{name}` 指定的完整 preset |
+| POST | `/api/projects/create-from-st` | 从 `{presetName,name?,version?}` 创建一次性工程快照 |
+| POST | `/api/projects/:projectId/push-preview` | 构建并预检 `{targetName,mode}`，其中 mode 为 `create` 或 `overwrite` |
+| POST | `/api/projects/:projectId/push-preset` | 使用 `{previewToken}` 提交一次手动保存 |
+
+创建会话请求：
+
+```json
+{
+  "origin": "http://127.0.0.1:8000",
+  "basicAuth": { "username": "可选", "password": "可选" },
+  "accountAuth": { "handle": "可选", "password": "可选" }
+}
+```
+
+`basicAuth` 用于 ST 启动时的 HTTP Basic Authentication；`accountAuth` 用于 ST 多用户登录。只提交目标实际需要的认证方式。成功返回 `{ "session": SessionInfo }`。读取接口返回 `{ "session": null }` 或同一摘要；`SessionInfo` 只包含：
+
+```text
+status, origin, version, branch?, userHandle?, authModes,
+compatibility, capabilities, connectedAt, lastCheckedAt, targetPolicy
+```
+
+其中 `status` 为 `connected | unreachable | expired | unsupported`，`compatibility` 为 `supported | untested`，`authModes` 只会包含 `basic`/`account`，当前 capabilities 为 `preset.list`、`preset.read`、`preset.save`。
+
+响应不会包含密码、Basic Authorization、ST Cookie 或 CSRF Token。Node 用 256-bit 随机标识在浏览器设置 `preset_studio_st_session` Cookie；它是 `HttpOnly`、`SameSite=Strict`、`Path=/api` 的会话 Cookie，在 HTTPS 下同时设置 `Secure`，不会存入浏览器 localStorage。
+
+### ST 内部请求流程
+
+Node 对 SillyTavern 1.18.x 使用以下服务端流程：
+
+1. 校验并规范化目标 Origin，应用 target policy。
+2. `GET /csrf-token`，在内存 Cookie jar 中接收 ST session Cookie，并取得 CSRF Token。
+3. 如提供 `accountAuth`，调用 `POST /api/users/login`，body 为 `{handle,password}`；Basic 凭据按需附在每次 ST 请求上。
+4. 再取得有效 CSRF Token，通过 `GET /version` 和 `POST /api/ping?extend=true` 检查版本/会话。
+5. 目录或读取请求调用 `POST /api/settings/get`，从 `settings`、`openai_setting_names` 与 `openai_settings` 建立 Chat Completion preset 结果。
+6. 手动提交时调用 `POST /api/presets/save`，body 为 `{apiId:"openai",name,preset}`。
+
+Node 不读取 ST secret store 中的 LLM API Key，不调用 LLM，也不使用 `/api/settings/save` 覆盖整份设置。
+
+Preset 目录响应为：
+
+```json
+{
+  "presets": [{ "name": "My preset", "revision": "sha256", "size": 1234 }],
+  "persistedSelectedPresetName": "My preset",
+  "refreshedAt": "2026-08-16T12:00:00.000Z"
+}
+```
+
+`persistedSelectedPresetName` 来自 ST 持久 settings，只用于提示，不等同于任一已打开标签页的实时选择。读取响应为 `{name,revision,size,preset}`；从 ST 创建工程返回 `{project,source:{presetName}}`，不建立后续同步。
+
+### 会话和凭据生命周期
+
+- 浏览器只持有 Preset Studio 的 opaque Cookie；ST Cookie/CSRF、Basic 凭据和必要的连接元数据只存在于 Node 内存。
+- 账号密码只用于建立 ST 登录会话，不写磁盘、不写日志、不放入工程或浏览器持久存储。
+- 服务重启、主动断开、会话 Cookie 丢失或空闲超时都会终止连接，需要重新输入目标和必要凭据。
+- 单活动会话按浏览器 Cookie 隔离；API 不暴露 `connectionId`，也不提供持久连接档案。
+
+### 推送预览与提交
+
+`push-preview` 会先强制使用已落盘的工程构建结果，读取目标 ST preset，并根据 `mode` 校验目标：
+
+- `create`：目标必须不存在，避免静默覆盖。
+- `overwrite`：目标必须存在；预览返回远端/构建 revision、体积和总体 change，不声称提供字段级 diff。
+
+预览成功后返回一个 256-bit 随机 token。token 仅在 Node 内存保存，默认 5 分钟有效，并绑定当前 ST 会话、projectId、targetName、mode、工程构建 revision/hash 和远端目标 hash。每次 `push-preset` 尝试都会先消费 token，包括远端请求失败的情况；工程、远端目标或会话变化后必须重新预览。这样确认动作不能被复用到另一份内容或另一个目标。
+
+预览响应包含：
+
+```json
+{
+  "previewToken": "opaque-secret",
+  "expiresAt": "2026-08-16T12:05:00.000Z",
+  "target": { "name": "Target", "exists": true, "revision": "sha256", "size": 1234 },
+  "build": {
+    "projectRevision": "manifest-updatedAt",
+    "revision": "sha256",
+    "size": 1234,
+    "diagnostics": []
+  },
+  "change": "changed",
+  "canCommit": true
+}
+```
+
+提交成功响应为 `{presetName,revision,savedAt,outcome,requiresStReload:true,stUrl}`，其中 `outcome` 是 `created | overwritten | unchanged`。
+
+保存成功只表示远端 `/api/presets/save` 已完成。官方服务端 REST API 不会控制已经打开的 ST 浏览器页面，因此该操作不会热切换/应用 preset。用户必须在 ST 中刷新 preset 列表并手动选择目标，再执行真实生成或 JavaScript/DOM 测试。
+
+### 工程 API
 
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 服务和工作区状态 |
-| POST | `/api/st/pairing` | 生成一次性 Bridge 配对码 |
-| GET | `/api/st/extension/archive` | 下载可手动安装的 Bridge 扩展 ZIP |
-| GET | `/api/st/connections` | 读取当前及短时可恢复的 ST 连接 |
 | GET | `/api/projects` | 工程摘要列表 |
-| POST | `/api/projects` | 新建空白工程，body 为 `{name?, version?}` |
-| POST | `/api/projects/create-from-st` | 从指定 ST 连接拉取当前 preset 并创建工程 |
+| POST | `/api/projects` | 新建空白工程，body 为 `{name?,version?}` |
 | POST | `/api/projects/import/json` | 从 preset 创建工程 |
 | POST | `/api/projects/import/archive` | 上传 Preset Studio ZIP 工程包 |
 | GET | `/api/projects/:id` | 读取 manifest |
 | GET | `/api/projects/:id/archive` | 下载完整 ZIP 工程包 |
 | GET | `/api/projects/:id/files` | 读取扁平文件树 |
 | GET | `/api/projects/:id/files/*` | 读取 UTF-8 文件内容和 revision |
-| PUT | `/api/projects/:id/files/*` | 原子保存 `{content, ifRevision?}` |
+| PUT | `/api/projects/:id/files/*` | 原子保存 `{content,ifRevision?}` |
 | POST | `/api/projects/:id/build` | 在内存中构建 JSON，不写 output |
 | POST | `/api/projects/:id/export` | 构建并写入 output，返回下载地址 |
 | GET | `/api/projects/:id/outputs` | 导出文件列表 |
 | GET | `/api/projects/:id/outputs/:filename` | 下载导出 JSON |
 
-JSON 导入的主格式是：
-
-~~~json
-{
-  "name": "工程名",
-  "version": "可选版本",
-  "preset": {}
-}
-~~~
-
-同时兼容 `multipart/form-data`：文件字段名为 `file`，另可提交 `name`、`version` 和 `sourcePresetName`；也兼容直接以 preset 作为请求体并通过 `X-Project-Name`、`X-Project-Version` 提供工程信息。
-
-### ZIP 工程包
-
-上传使用：
-
-~~~text
-POST /api/projects/import/archive
-Content-Type: multipart/form-data
-
-file=<project.zip>
-name=<可选覆盖工程名>
-version=<可选覆盖版本>
-~~~
-
-也可以直接发送 `application/zip` 或 `application/octet-stream`，并通过 `X-Project-Name`、`X-Project-Version` 提供覆盖值。成功返回：
-
-~~~json
-{
-  "project": {},
-  "import": {
-    "originalProjectId": "project-old-id",
-    "idRegenerated": true
-  }
-}
-~~~
-
-工程包根目录必须直接包含 `project.json`，不能多包一层目录。服务端永远生成新的项目 ID，并将来源设为 `project-package`；即使工作区中不存在 ID 冲突，也不会信任或复用包内 ID，因此不会覆盖已有工程。
-
-下载接口返回 `application/zip` 和 RFC 5987 `Content-Disposition` 附件文件名。工程包包含 manifest、拆分源码、快照、recovery、output 和其他工程内文件；符号链接和原子写入遗留的临时文件不会进入包中。
-
-ZIP 导入先解压到工作区内的随机 staging 目录，完整验证 `project.json`、受管索引及构建结果后，才通过同文件系统目录重命名提交。失败时删除 staging，不留下可见的半成品工程。安全检查包括：
-
-- 拒绝绝对路径、`..`、反斜杠路径、Windows 设备名和非法文件名。
-- 拒绝大小写或 Unicode 归一化后碰撞的重复路径。
-- 拒绝文件与目录父子冲突；解压始终创建普通文件，不恢复符号链接。
-- 限制压缩大小、解压总大小、单文件大小和文件/目录条目数。
-- 要求根 `project.json` 为 schema 1，并验证所有受管拆分文件可以重新构建 preset。
+JSON 导入主格式是 `{ "name":"工程名", "version":"可选版本", "preset":{} }`。它也支持 `multipart/form-data`，文件字段名为 `file`，并可提交 `name`、`version` 和 `sourcePresetName`；直接发送 preset 时可用 `X-Project-Name`、`X-Project-Version` 提供工程信息。
 
 错误统一返回：
 
-~~~json
+```json
 {
   "error": {
     "code": "REVISION_CONFLICT",
@@ -139,167 +197,80 @@ ZIP 导入先解压到工作区内的随机 staging 目录，完整验证 `proje
     "details": {}
   }
 }
-~~~
+```
 
-## SillyTavern Bridge v1
+ST 直连的主要错误类别：
 
-Bridge 只负责把已运行的 SillyTavern 当前 preset 一次性拉入工程；配对码、恢复令牌、连接状态和待处理 RPC 全部只保存在服务端内存中，重启即失效。Bridge 不访问 SillyTavern 的登录凭据、Cookie、secret/API Key 存储，也不会把这些会话信息写入 Studio。
+- `ST_TARGET_INVALID` / `ST_TARGET_NOT_ALLOWED`：URL 或 target policy 拒绝。
+- `ST_BASIC_AUTH_REQUIRED|FAILED`、`ST_ACCOUNT_AUTH_REQUIRED|FAILED`、`ST_SESSION_REQUIRED|EXPIRED`：需要重新提供对应认证或重连。
+- `ST_VERSION_UNSUPPORTED`、`ST_ENDPOINT_UNAVAILABLE`、`ST_RESPONSE_INVALID`：ST 版本或 wire contract 不兼容。
+- `ST_PRESET_NOT_FOUND`、`ST_PRESET_TARGET_EXISTS`、`ST_PRESET_CONFLICT`：读取/目标存在性或远端 revision 冲突。
+- `ST_PREVIEW_INVALID|EXPIRED|NOT_COMMITTABLE`、`ST_PROJECT_CHANGED`：必须重新生成推送预览。
+- `ST_DNS_FAILED`、`ST_TLS_ERROR`、`ST_UNREACHABLE`、`ST_CONNECT_TIMEOUT`、`ST_TIMEOUT`、`ST_REDIRECT_REJECTED`、`ST_RESPONSE_TOO_LARGE`：目标网络或响应边界错误。
+- `ST_SAVE_VERIFY_FAILED`：ST 返回保存成功但重新读取的 revision 不一致。
 
-不过，`preset.pull` 为保证语义一致会传输完整 preset。SillyTavern 允许用户把 `proxy_password`、`reverse_proxy`、`custom_include_headers` 等连接信息直接保存在 preset 内；未知扩展字段也可能包含敏感内容。这些字段属于 preset 本身，会被保留到工程、快照、导出 JSON 和工程 ZIP 中。Studio 不会自动脱敏，用户应保护工作区和下载的工程文件；独立保存在 ST secret store 中的供应商 API Key 不会被读取。
+## ZIP 工程包
 
-### 扩展下载与手动安装
+上传接口接受 `multipart/form-data`、`application/zip` 或 `application/octet-stream`。ZIP 根目录必须直接包含 `project.json`，不能多包一层目录。服务端始终生成新项目 ID，并把来源设为 `project-package`，不会信任或复用包内 ID。
 
-~~~text
-GET /api/st/extension/archive
-~~~
+导入先解压到工作区内随机 staging 目录，完整验证 manifest、受管索引和构建结果后，才通过同文件系统目录重命名提交。安全检查包括：
 
-成功时返回 `application/zip`、`Cache-Control: no-store` 和附件文件名 `preset-studio-bridge.zip`。ZIP 顶层固定为 `preset-studio-bridge/`，且只包含经过白名单固定的 `manifest.json`、`index.js`、`style.css`、`README.md`。服务端不接受文件名或目录参数；镜像中任一文件缺失时返回 `503 EXTENSION_ARCHIVE_UNAVAILABLE`，不会生成残缺安装包。
+- 拒绝绝对路径、`..`、反斜杠路径、Windows 设备名和非法文件名。
+- 拒绝大小写或 Unicode 归一化后碰撞的重复路径。
+- 拒绝文件/目录父子冲突；只创建普通文件，不恢复符号链接。
+- 限制压缩大小、解压总大小、单文件大小和条目数。
+- 要求根 `project.json` 为 schema 1，并验证所有受管拆分文件能够重新构建 preset。
 
-解压后，将整个 `preset-studio-bridge/` 目录复制到当前 ST 用户数据目录的 `data/<user-handle>/extensions/` 下，刷新 SillyTavern，然后在扩展设置中找到 **Preset Studio Bridge**。该包不是独立 Git 仓库，因此不能作为 SillyTavern 的“从 Git URL 安装”地址。
-
-连接流程：
-
-1. Studio 调用 `POST /api/st/pairing` 创建配对码。
-2. 用户把配对码和 Studio 地址交给安装在 SillyTavern 中的 Bridge 扩展。
-3. 扩展连接 `ws://<studio-host>/bridge`；若 Studio 使用 HTTPS，则必须使用 `wss://`。
-4. 扩展用配对码发送 hello，收到 ack 后保存内存中的恢复令牌。
-5. Studio 可从 `/api/st/connections` 选择连接，再调用 `/api/projects/create-from-st`。
-
-配对响应为顶层对象，`expiresAt` 是 ISO 8601 时间：
-
-~~~json
-{
-  "pairingCode": "96-bit-base64url",
-  "expiresAt": "2026-08-15T12:00:00.000Z",
-  "bridgePath": "/bridge"
-}
-~~~
-
-WebSocket 首包必须恰好提供 `pairingCode` 或 `resumeToken` 之一：
-
-~~~json
-{
-  "type": "bridge.hello",
-  "protocolVersion": 1,
-  "pairingCode": "96-bit-base64url",
-  "bridgeVersion": "1.0.0",
-  "st": {
-    "version": "1.14.0",
-    "branch": "release",
-    "url": "http://127.0.0.1:8000/"
-  },
-  "capabilities": ["preset.pull"],
-  "context": {
-    "currentPresetName": "My preset",
-    "characterName": "Alice",
-    "chatId": "chat-id",
-    "personaName": "Default"
-  }
-}
-~~~
-
-`context` 是可选的通用 JSON 对象；上述 key 是第一版建议值，不是必填 schema。若提供 `st.url`，其 Origin 必须与浏览器 WebSocket Upgrade 携带的 Origin 一致。服务端 ack 为：
-
-~~~json
-{
-  "type": "bridge.ack",
-  "connectionId": "uuid",
-  "resumeToken": "256-bit-base64url",
-  "heartbeatIntervalMs": 15000
-}
-~~~
-
-恢复连接时以新的 hello 携带 `resumeToken`，并且必须来自原 Origin。每次 ack 都轮换令牌，旧令牌立即失效；恢复成功保留 `connectionId`。断开的连接会在恢复期限内以 `status: "disconnected"` 保留，连接列表按 `lastSeenAt` 降序返回：
-
-~~~json
-{
-  "connections": [
-    {
-      "connectionId": "uuid",
-      "status": "connected",
-      "protocolVersion": 1,
-      "bridgeVersion": "1.0.0",
-      "st": { "version": "1.14.0" },
-      "capabilities": ["preset.pull"],
-      "context": { "currentPresetName": "My preset" },
-      "connectedAt": "2026-08-15T11:00:00.000Z",
-      "lastSeenAt": "2026-08-15T11:30:00.000Z",
-      "resumableUntil": "2026-08-15T12:00:00.000Z"
-    }
-  ]
-}
-~~~
-
-RPC 使用以下 envelope；第一版唯一方法是 `preset.pull`：
-
-~~~json
-{"type":"rpc.request","id":"uuid","method":"preset.pull","params":{}}
-~~~
-
-~~~json
-{"type":"rpc.response","id":"uuid","ok":true,"result":{"name":"My preset","preset":{}}}
-~~~
-
-失败响应为 `{"type":"rpc.response","id":"uuid","ok":false,"error":{"code":"...","message":"...","details":{}}}`。心跳为 `{"type":"ping","timestamp":123}` / `{"type":"pong","timestamp":123}`。认证或协议失败时，服务端先发送 `{"type":"bridge.error","code":"...","message":"..."}`，再以 WebSocket policy close `1008` 关闭；服务端内部故障使用 `1011`。
-
-从 ST 创建工程的请求与成功响应：
-
-~~~json
-{"connectionId":"uuid","name":"可选工程名","version":"可选版本"}
-~~~
-
-~~~json
-{
-  "project": {},
-  "source": { "connectionId": "uuid", "presetName": "ST 中的 preset 名" }
-}
-~~~
-
-该操作只拉取当次快照，不建立持续同步。未连接返回 `409 BRIDGE_DISCONNECTED`，RPC 中途断线返回 `503 BRIDGE_DISCONNECTED`，远端拒绝返回 `502 RPC_REMOTE_ERROR`，超时返回 `504 RPC_TIMEOUT`；都沿用统一 REST 错误 envelope。
-
-Upgrade 只接受精确的 `/bridge` 路径、文本 JSON、有效的 HTTP(S) Origin 和受限消息大小；无 Origin 的 WebSocket 客户端会被拒绝。反向代理必须转发 WebSocket Upgrade 与原始 Origin。裸 Node 默认只监听回环地址；第一版无账号系统，配对机制不能替代公网访问控制，请勿把服务直接暴露到公网。
+下载接口返回 `application/zip` 和 RFC 5987 `Content-Disposition` 文件名。工程包包含 manifest、拆分源码、snapshot、recovery、output 和其他普通工程文件，不包含符号链接或原子写入临时文件。
 
 ## 工程格式
 
-导入器生成实施方案约定的 `project.json`、`preset.base.json`、`prompts/`、`regex/`、`scripts/`、`snapshots/`、`recovery/` 和 `output/`。
+导入器生成 `project.json`、`preset.base.json`、`prompts/`、`regex/`、`scripts/`、`snapshots/`、`recovery/` 和 `output/`。
 
-- Prompt 的元数据与正文分别保存为 `meta.json`、`content.md`。
-- Regex 的元数据、查找式、替换 HTML 分别保存为 `meta.json`、`find.txt`、`replace.html`。
-- Tavern Helper 脚本的元数据和源码分别保存为 `meta.json`、`content.js`。
-- `preset.base.json` 保留所有不由专用编辑器管理的已知和未知字段。
-- 示例采用的三个一致 Regex 镜像被识别为一个逻辑集合，构建时写回三个目标。
-- 冲突的 Regex 镜像不会被静默合并，而是完整保留在 `preset.base.json`。
+- Prompt 元数据和正文分别保存为 `meta.json`、`content.md`。
+- Regex 元数据、查找式和替换 HTML 分别保存为 `meta.json`、`find.txt`、`replace.html`。
+- Tavern Helper 脚本元数据和源码分别保存为 `meta.json`、`content.js`。
+- `preset.base.json` 保留未由专用编辑器管理的所有已知/未知字段。
+- 示例中的三个一致 Regex 镜像被识别为一个逻辑集合，构建时写回三个目标。
+- 冲突的 Regex 镜像不会静默合并，而会完整保留在 `preset.base.json`。
 
-写文件使用同目录临时文件、`fsync` 和 `rename`；manifest 最后提交。文件 API 拒绝绝对路径、父目录跳转、NUL 和符号链接逃逸。`ifRevision` 使用 SHA-256 实现乐观并发控制。
+写文件使用同目录临时文件、`fsync` 和 `rename`；manifest 最后提交。文件 API 拒绝绝对路径、父目录跳转、NUL 和符号链接逃逸。`ifRevision` 使用 SHA-256 做乐观并发控制。
 
 ## 测试
 
-~~~bash
+```bash
 pnpm --dir server test
-~~~
+```
 
-测试使用 `node:test` 和小型内存构造 fixture，不读取或复制仓库中的 8.8 MB 样本。覆盖语义 round-trip、未知字段、Regex 镜像、脚本拆分、原子保存、revision 冲突、普通路径穿越、ZIP Slip、ZIP 根 manifest、各项解压限额、工程包往返、ID 重生成、multipart HTTP 上传、ZIP 下载、同源/白名单/拒绝 Origin、preflight、health 隐私，以及 Bridge 扩展固定白名单打包/缺件错误、默认单位、一次性配对、hello/ack、Origin 拒绝、连接列表、ping/pong、preset RPC、工程往返、恢复令牌轮换、错误和 RPC 断线清理。
+自动测试应覆盖工程语义 round-trip、未知字段、Regex 镜像、脚本拆分、原子保存、revision 冲突、路径与 ZIP 安全、工程包往返、multipart 上传、Origin/CORS 和 health 隐私，以及 ST target policy、CSRF/Cookie jar、Basic/账号认证、会话隔离与过期、preset 目录/读取、从 ST 创建工程、推送 preview token 绑定/过期/单次消费、远端冲突、超时、响应限额和敏感字段不回显。
+
+真实 ST 1.18.x 手动验收至少包括：
+
+1. 无认证、本机 ST 建立/检查/断开会话。
+2. Basic Authentication、多用户登录及两者组合。
+3. Docker 容器按白名单或 `private` 策略连接 LAN 中的 ST。
+4. 列出 preset、读取指定 preset，并从它创建一次性工程快照。
+5. `create` 拒绝已有目标，`overwrite` 拒绝缺失目标；工程或远端变化使旧 preview token 失效。
+6. 提交后 ST 磁盘中出现/更新 preset；刷新 ST 页面并手动选择后内容正确。
+7. 错误密码、CSRF 失效、ST 停止、超时和超大响应给出可操作错误，日志不包含密码、Authorization、Cookie、CSRF 或完整 preset。
+
+容器内的 `127.0.0.1` 是容器本身。ST 运行在宿主机时，应使用容器可达的 LAN 地址；Docker Desktop 可使用 `host.docker.internal`，Linux 可使用宿主机 LAN 地址或由部署者显式配置 `host-gateway`。无论采用哪种地址，都要配置精确 Origin 白名单或 `private` 策略。
 
 ## Docker 健康检查与工作区权限
 
-镜像和 Compose 都使用 `/api/health` 进行健康检查。该接口默认只返回：
+镜像和 Compose 使用 `/api/health`。默认响应只返回 `{ "ok":true }`。仅当 `PRESET_STUDIO_EXPOSE_WORKSPACE_PATH=true` 时才额外返回工作区绝对路径。
 
-~~~json
-{"ok":true}
-~~~
+容器使用非 root UID/GID，Compose 默认 `1000:1000`，移除 Linux capabilities 并启用 `no-new-privileges`。bind mount 目录必须允许该 UID/GID 读写；若宿主机使用其他所有者，可在 `.env` 配置 `PRESET_STUDIO_UID`、`PRESET_STUDIO_GID`。工程写入容器 `/app/workspace-data`，由 `PRESET_STUDIO_WORKSPACE_HOST` 映射到宿主机。
 
-运行时使用非 root UID/GID，默认是 Node Alpine 的 `1000:1000`，并移除 Linux capabilities、启用 `no-new-privileges`。Compose 使用宿主机目录挂载工作区；Linux 主机必须确保该目录对运行 UID 可写：
+## 直接部署构建产物
 
-~~~bash
-mkdir -p workspace-data
-sudo chown -R 1000:1000 workspace-data
-docker compose up --build
-~~~
+`dist/` 只包含前端静态资源，单独部署它只能显示 UI，不能保存工程或连接 ST。完整部署必须同时包含：
 
-如果宿主机用户不是 UID/GID 1000，可以在启动时匹配宿主机身份：
+```text
+dist/
+server/dist/
+server/package.json
+server/node_modules/
+```
 
-~~~bash
-PRESET_STUDIO_UID=$(id -u) PRESET_STUDIO_GID=$(id -g) docker compose up --build
-~~~
-
-Windows/macOS Docker Desktop 通常由文件共享层处理 UID 映射。若显式挂载其他目录，仍需确认容器进程对其有创建目录、写临时文件和 rename 的权限。不要为了绕过权限问题把容器改回 root；应修正宿主目录所有权或配置 UID/GID。
+随后设置 `PRESET_STUDIO_STATIC_ROOT` 和 `PRESET_STUDIO_WORKSPACE`，运行 `node server/dist/index.js`。若前端静态文件与 API 分离托管，必须由 UI Origin 同源反向代理 `/api`；单独配置 CORS 不能满足 ST 会话 Cookie 的安全约束。

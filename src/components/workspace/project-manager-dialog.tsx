@@ -7,11 +7,15 @@ import {
   LoaderCircle,
   Plus,
   RadioTower,
+  RefreshCw,
+  Server,
   Upload,
 } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { cn } from "../../lib/utils";
+import { runSafely } from "../../lib/async";
+import type { StPresetCatalog, StSession } from "../../lib/st-api";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -33,14 +37,6 @@ export interface ProjectChoice {
   updatedAt?: string;
 }
 
-export interface StProjectSourceChoice {
-  connectionId: string;
-  stVersion: string;
-  bridgeVersion: string;
-  presetName?: string;
-  contextLabel?: string;
-}
-
 interface ProjectManagerDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -48,7 +44,9 @@ interface ProjectManagerDialogProps {
   activeProjectId?: string;
   busy?: boolean;
   error?: string;
-  stConnections: StProjectSourceChoice[];
+  stSession: StSession | null;
+  stCatalog: StPresetCatalog | null;
+  isLoadingStPresets?: boolean;
   onSelect: (projectId: string) => void | Promise<void>;
   onCreate: (input: { name: string; version?: string }) => void | Promise<void>;
   onImport: (input: {
@@ -63,10 +61,12 @@ interface ProjectManagerDialogProps {
     file: File;
   }) => void | Promise<void>;
   onCreateFromSt: (input: {
-    connectionId: string;
+    presetName: string;
     name?: string;
     version?: string;
   }) => void | Promise<void>;
+  onRefreshStPresets: () => void | Promise<unknown>;
+  onOpenStConnection: () => void;
 }
 
 export function ProjectManagerDialog({
@@ -76,23 +76,30 @@ export function ProjectManagerDialog({
   activeProjectId,
   busy,
   error,
-  stConnections,
+  stSession,
+  stCatalog,
+  isLoadingStPresets,
   onSelect,
   onCreate,
   onImport,
   onImportArchive,
   onCreateFromSt,
+  onRefreshStPresets,
+  onOpenStConnection,
 }: ProjectManagerDialogProps) {
   const [name, setName] = useState("");
   const [version, setVersion] = useState("");
   const [selectedFile, setSelectedFile] = useState<File>();
   const [localError, setLocalError] = useState<string>();
-  const [selectedConnectionId, setSelectedConnectionId] = useState<string>();
+  const [selectedPresetName, setSelectedPresetName] = useState<string>();
   const inputRef = useRef<HTMLInputElement>(null);
   const selectedKind = selectedFile ? getImportKind(selectedFile) : undefined;
-  const effectiveConnectionId =
-    stConnections.find((connection) => connection.connectionId === selectedConnectionId)?.connectionId ??
-    stConnections[0]?.connectionId;
+  const presets = stCatalog?.presets ?? [];
+  const persistedPresetName = stCatalog?.persistedSelectedPresetName ?? undefined;
+  const effectivePresetName =
+    presets.find((preset) => preset.name === selectedPresetName)?.name ??
+    presets.find((preset) => preset.name === persistedPresetName)?.name ??
+    presets[0]?.name;
 
   const createProject = async () => {
     if (!name.trim()) {
@@ -147,13 +154,17 @@ export function ProjectManagerDialog({
   };
 
   const createFromSt = async () => {
-    if (!effectiveConnectionId) {
-      setLocalError("当前没有可用的 SillyTavern 连接。");
+    if (stSession?.status !== "connected") {
+      setLocalError("请先连接 SillyTavern。");
+      return;
+    }
+    if (!effectivePresetName) {
+      setLocalError("请选择一个 Chat Completion preset。");
       return;
     }
     setLocalError(undefined);
     await onCreateFromSt({
-      connectionId: effectiveConnectionId,
+      presetName: effectivePresetName,
       name: name.trim() || undefined,
       version: version.trim() || undefined,
     });
@@ -170,11 +181,11 @@ export function ProjectManagerDialog({
           </div>
           <DialogTitle>工程管理</DialogTitle>
           <DialogDescription>
-            工程保存在服务端工作区。可从已连接 ST 的当前 preset 建立快照、导入文件或新建空白工程。
+            工程保存在服务端工作区。可从 ST 显式选择 preset 建立快照，也可导入文件或新建空白工程。
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue={projects.length ? "projects" : stConnections.length ? "st" : "import"}>
+        <Tabs defaultValue={projects.length ? "projects" : stSession?.status === "connected" ? "st" : "import"}>
           <TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:grid-cols-4">
             <TabsTrigger value="projects">已有工程</TabsTrigger>
             <TabsTrigger value="st">从 ST 创建</TabsTrigger>
@@ -189,7 +200,7 @@ export function ProjectManagerDialog({
                   key={project.id}
                   type="button"
                   disabled={busy}
-                  onClick={() => void onSelect(project.id)}
+                  onClick={() => runSafely(() => onSelect(project.id))}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-xl border p-3 text-left outline-none transition-colors hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-ring/30",
                     project.id === activeProjectId
@@ -222,51 +233,60 @@ export function ProjectManagerDialog({
 
           <TabsContent value="st" className="space-y-4 py-4">
             <div className="rounded-xl border border-primary/15 bg-primary-soft/30 p-4 text-xs leading-5 text-muted-foreground">
-              单向拉取所选连接的完整 Chat Completion preset，并创建一次性工程快照；不会修改 ST，也不会建立持续同步。快照中的 proxy_password、reverse_proxy、custom headers 等连接字段会被写入工程，请按敏感配置管理。
+              从服务端 catalog 明确选择一个完整 Chat Completion preset，并创建一次性工程快照；不会修改 ST，也不会建立持续同步。preset 自带的敏感连接字段会进入工程，请按敏感配置管理。
             </div>
-            <div className="space-y-2">
-              {stConnections.map((connection) => {
-                const selected = connection.connectionId === effectiveConnectionId;
-                return (
-                  <button
-                    key={connection.connectionId}
-                    type="button"
-                    aria-pressed={selected}
-                    disabled={busy}
-                    onClick={() => setSelectedConnectionId(connection.connectionId)}
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-xl border p-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/30",
-                      selected ? "border-primary/30 bg-primary-soft/45" : "border-border bg-surface hover:border-primary/25",
-                    )}
-                  >
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-surface text-success shadow-xs">
-                      <RadioTower className="size-4" />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                        ST {connection.stVersion}
-                        <Badge variant="green">在线</Badge>
-                      </span>
-                      <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
-                        {connection.presetName ?? "当前 preset 名称将在拉取后确定"}
-                        {connection.contextLabel ? ` · ${connection.contextLabel}` : ""}
-                        {` · Bridge ${connection.bridgeVersion}`}
-                      </span>
-                    </span>
-                    {selected ? <Check className="size-4 text-success" /> : null}
-                  </button>
-                );
-              })}
-              {!stConnections.length ? (
-                <div className="rounded-xl border border-dashed border-border py-8 text-center text-xs text-muted-foreground">
-                  没有在线 ST 连接。请返回连接页重新配对。
+            {stSession?.status === "connected" ? (
+              <div className="space-y-3 rounded-xl border border-border bg-surface p-4">
+                <div className="flex items-start gap-3">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-success-soft text-success">
+                    <Server className="size-4" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-medium">ST {stSession.version ?? "未知版本"}</p>
+                      <Badge variant="green">HTTP 已连接</Badge>
+                    </div>
+                    <p className="mt-1 truncate text-[10px] text-muted-foreground">{stSession.origin}</p>
+                  </div>
+                  <Button variant="ghost" size="icon-sm" disabled={isLoadingStPresets} onClick={() => runSafely(onRefreshStPresets)} aria-label="刷新 preset 列表">
+                    <RefreshCw className={isLoadingStPresets ? "animate-spin" : undefined} />
+                  </Button>
                 </div>
-              ) : null}
-            </div>
-            <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} namePlaceholder="留空使用 ST 当前 preset 名称" />
-            <Button className="w-full" disabled={busy || !effectiveConnectionId} onClick={() => void createFromSt()}>
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-medium text-muted-foreground">Chat Completion preset</span>
+                  <select
+                    value={effectivePresetName ?? ""}
+                    onChange={(event) => setSelectedPresetName(event.target.value)}
+                    disabled={busy || isLoadingStPresets || !presets.length}
+                    className="flex h-10 w-full rounded-lg border border-input bg-surface px-3 text-sm text-foreground shadow-xs outline-none focus:border-primary/50 focus:ring-2 focus:ring-ring/20 disabled:opacity-50"
+                  >
+                    {!presets.length ? <option value="">没有可用 preset</option> : null}
+                    {presets.map((preset) => (
+                      <option key={preset.name} value={preset.name}>
+                        {preset.name} · {formatBytes(preset.size)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {stCatalog ? (
+                  <p className="text-[10px] text-muted-foreground">
+                    {presets.length} 个 preset · catalog 更新于 {formatDate(stCatalog.refreshedAt)}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-border px-4 py-7 text-center">
+                <p className="text-xs text-muted-foreground">尚未建立 SillyTavern HTTP 会话。</p>
+                <Button variant="secondary" size="sm" className="mt-3" onClick={onOpenStConnection}>
+                  <Server />
+                  打开连接设置
+                </Button>
+              </div>
+            )}
+            <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} namePlaceholder="留空使用所选 preset 名称" />
+            <Button className="w-full" disabled={busy || !effectivePresetName || stSession?.status !== "connected"} onClick={() => runSafely(createFromSt)}>
               {busy ? <LoaderCircle className="animate-spin" /> : <RadioTower />}
-              从 ST 当前 preset 创建工程
+              从所选 preset 创建工程
             </Button>
           </TabsContent>
 
@@ -310,7 +330,7 @@ export function ProjectManagerDialog({
               </div>
             )}
             <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} />
-            <Button className="w-full" disabled={busy || !selectedFile} onClick={() => void importProject()}>
+            <Button className="w-full" disabled={busy || !selectedFile} onClick={() => runSafely(importProject)}>
               {busy ? <LoaderCircle className="animate-spin" /> : <Upload />}
               {selectedKind === "archive" ? "导入工程包副本" : "导入并创建拆分工程"}
             </Button>
@@ -321,7 +341,7 @@ export function ProjectManagerDialog({
               空白工程会创建标准 Chat Completion preset 基础结构，version 可以留空并稍后维护。
             </div>
             <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} />
-            <Button className="w-full" disabled={busy} onClick={() => void createProject()}>
+            <Button className="w-full" disabled={busy} onClick={() => runSafely(createProject)}>
               {busy ? <LoaderCircle className="animate-spin" /> : <Plus />}
               创建空白工程
             </Button>
@@ -349,6 +369,17 @@ function getImportKind(file: File): "json" | "archive" | undefined {
   if (lowerName.endsWith(".zip")) return "archive";
   if (lowerName.endsWith(".json")) return "json";
   return undefined;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
 function ProjectFields({

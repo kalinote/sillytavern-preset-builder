@@ -17,7 +17,6 @@ coverage/
 /tmp/
 /uploads/
 /downloads/
-/preset-studio-bridge.zip
 *.pid
 *.pid.lock
 

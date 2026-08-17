@@ -23,8 +23,6 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/server/package.json ./server/package.json
 COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/server/node_modules ./server/node_modules
-COPY --from=build --chown=node:node /app/sillytavern-extension ./sillytavern-extension
-
 RUN mkdir -p /app/workspace-data && chown node:node /app/workspace-data
 
 USER node

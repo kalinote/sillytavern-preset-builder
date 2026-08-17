@@ -4,17 +4,21 @@ import { Button } from "../ui/button";
 
 interface ProjectEmptyStateProps {
   backendOnline: boolean;
+  stConnected: boolean;
   loading?: boolean;
   error?: string;
   onOpenProjects: () => void;
+  onOpenConnection: () => void;
   onRetry: () => void;
 }
 
 export function ProjectEmptyState({
   backendOnline,
+  stConnected,
   loading,
   error,
   onOpenProjects,
+  onOpenConnection,
   onRetry,
 }: ProjectEmptyStateProps) {
   return (
@@ -29,7 +33,7 @@ export function ProjectEmptyState({
           </h1>
           <p className="mt-3 max-w-xl text-sm leading-7 text-muted-foreground">
             {backendOnline
-              ? "从已连接 SillyTavern 的当前 Chat Completion preset 创建一次性工程快照，也可导入文件或创建空白工程。所有实时保存只写入服务端工作区。"
+              ? "可以从 SillyTavern catalog 明确选择一个 Chat Completion preset 创建快照，也可直接导入文件或创建空白工程。ST 暂时离线不会阻止本地工程操作。"
               : "前端已经运行，但没有连接到 Node 工程服务。请使用新的 pnpm dev 启动方式，或检查 /api/health。"}
           </p>
 
@@ -42,9 +46,9 @@ export function ProjectEmptyState({
           <div className="mt-7 flex flex-wrap gap-3">
             {backendOnline ? (
               <>
-                <Button onClick={onOpenProjects} disabled={loading}>
+                <Button onClick={stConnected ? onOpenProjects : onOpenConnection} disabled={loading}>
                   <RadioTower />
-                  从 ST 当前 preset 创建
+                  {stConnected ? "从 ST 选择 preset" : "连接 SillyTavern"}
                 </Button>
                 <Button variant="secondary" onClick={onOpenProjects} disabled={loading}>
                   <Plus />
