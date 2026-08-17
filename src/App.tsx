@@ -28,6 +28,7 @@ import {
 } from "./components/workspace/workspace-file-explorer";
 import { WorkspaceInspector } from "./components/workspace/workspace-inspector";
 import { WorkspaceInspectorDrawer } from "./components/workspace/workspace-inspector-drawer";
+import { ResizableSidebar } from "./components/workspace/resizable-sidebar";
 import { WorkspaceTopBar } from "./components/workspace/workspace-top-bar";
 import {
   DeleteProjectDialog,
@@ -352,14 +353,22 @@ export default function App() {
             {desktopLayout ? (
               <div className="flex min-h-0 flex-1">
               {explorerVisible && (
-                <WorkspaceFileExplorer
-                  projectName={workspace.project.name}
-                  projectVersion={workspace.project.version ?? undefined}
-                  files={explorerFiles}
-                  activePath={activePath}
-                  onSelect={handleDesktopFileSelect}
-                  onOpenProjects={openProjectManager}
-                />
+                <ResizableSidebar
+                  side="left"
+                  defaultWidth={292}
+                  minWidth={220}
+                  maxWidth={480}
+                  label="调整文件侧边栏宽度"
+                >
+                  <WorkspaceFileExplorer
+                    projectName={workspace.project.name}
+                    projectVersion={workspace.project.version ?? undefined}
+                    files={explorerFiles}
+                    activePath={activePath}
+                    onSelect={handleDesktopFileSelect}
+                    onOpenProjects={openProjectManager}
+                  />
+                </ResizableSidebar>
               )}
 
               <WorkspaceEditorPane
@@ -378,9 +387,14 @@ export default function App() {
               />
 
               {inspectorVisible && (
-                <div
+                <ResizableSidebar
                   id="desktop-workspace-inspector"
-                  className="hidden min-h-0 xl:flex"
+                  side="right"
+                  defaultWidth={360}
+                  minWidth={280}
+                  maxWidth={520}
+                  label="调整检查器侧边栏宽度"
+                  className="hidden xl:flex"
                   data-testid="desktop-inspector-panel"
                 >
                   <WorkspaceInspector
@@ -393,7 +407,7 @@ export default function App() {
                     saveMode={workspace.saveMode}
                     backendOnline={backendOnline}
                   />
-                </div>
+                </ResizableSidebar>
               )}
 
               <div className="absolute bottom-10 right-3 z-20 hidden xl:block">

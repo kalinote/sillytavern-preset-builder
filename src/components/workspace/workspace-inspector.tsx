@@ -50,7 +50,7 @@ export function WorkspaceInspector({
   return (
     <aside
       className={cn(
-        "flex h-full w-[360px] shrink-0 flex-col border-l border-border bg-surface",
+        "flex h-full w-full shrink-0 flex-col border-l border-border bg-surface",
         className,
       )}
     >

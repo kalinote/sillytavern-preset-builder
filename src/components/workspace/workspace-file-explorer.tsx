@@ -35,6 +35,7 @@ interface WorkspaceFileExplorerProps {
   activePath?: string;
   onSelect: (path: string) => void;
   onOpenProjects: () => void;
+  className?: string;
 }
 
 interface ExplorerNode {
@@ -54,6 +55,7 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
   activePath,
   onSelect,
   onOpenProjects,
+  className,
 }: WorkspaceFileExplorerProps) {
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initiallyExpanded));
@@ -90,7 +92,12 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
   };
 
   return (
-    <aside className="flex h-full w-full shrink-0 flex-col border-r border-border bg-sidebar md:w-[292px]">
+    <aside
+      className={cn(
+        "flex h-full w-full shrink-0 flex-col border-r border-border bg-sidebar",
+        className,
+      )}
+    >
       <div className="border-b border-border p-3">
         <button
           type="button"
