@@ -11,6 +11,14 @@ import { atomicWriteFile } from "./atomic.js";
 import { buildPresetProject } from "./builder.js";
 import { ApiError } from "./errors.js";
 import { firstSemanticDifference, isJsonObject, semanticEqual, stableSha256, stringifyJson } from "./json.js";
+import { installManagedSources, stageManagedSources } from "./managed-source-transaction.js";
+import {
+  createProjectSnapshot,
+  deleteProjectSnapshot,
+  listProjectSnapshots,
+  readSnapshotPreset,
+} from "./project-snapshots.js";
+import { applyStructureMutation, readProjectStructure } from "./project-structure.js";
 import { assertProjectId, resolveInsideProject, safeExportStem } from "./safety.js";
 import { createBlankPreset, splitPresetProject } from "./splitter.js";
 import type {
@@ -20,26 +28,19 @@ import type {
   ProjectFile,
   ProjectFileEntry,
   ProjectManifest,
+  ProjectSnapshotSummary,
+  ProjectStructure,
   ProjectSummary,
+  SnapshotReason,
+  StructureMutation,
 } from "./types.js";
 
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const SOURCE_JSON_PATH = "preset.json";
-const MANAGED_SOURCE_PATHS = ["preset.base.json", "prompts", "regex", "scripts", "project.json"] as const;
 
 interface ItemDirectoryMetadata {
   displayName: string;
   order: number;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
 }
 
 export interface ProjectBuildSnapshot {
@@ -246,7 +247,7 @@ export class ProjectStore {
     const source = isJsonObject(value) && isJsonObject(value.source) ? value.source : undefined;
     if (
       !isJsonObject(value) ||
-      value.schemaVersion !== 1 ||
+      value.schemaVersion !== 2 ||
       typeof value.id !== "string" ||
       !value.id ||
       typeof value.name !== "string" ||
@@ -270,6 +271,152 @@ export class ProjectStore {
   async getProject(projectId: string): Promise<ProjectManifest> {
     const projectRoot = this.projectRoot(projectId);
     return this.withProjectLock(projectId, () => this.readManifest(projectRoot));
+  }
+
+  async updateProject(
+    projectId: string,
+    input: { ifProjectRevision: string; name?: string; version?: string; targetPresetName?: string },
+  ): Promise<ProjectManifest> {
+    if (typeof input.ifProjectRevision !== "string" || !input.ifProjectRevision) {
+      throw new ApiError(400, "INVALID_INPUT", "ifProjectRevision is required");
+    }
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      if (manifest.updatedAt !== input.ifProjectRevision) {
+        throw new ApiError(409, "PROJECT_REVISION_CONFLICT", "Project settings changed since they were opened", {
+          expected: input.ifProjectRevision,
+          actual: manifest.updatedAt,
+        });
+      }
+      const name = validateLabel(input.name, "name", 120);
+      const version = validateLabel(input.version, "version", 80);
+      const targetPresetName = validateLabel(input.targetPresetName, "targetPresetName", 120);
+      if (name !== undefined) {
+        if (!name) throw new ApiError(400, "INVALID_INPUT", "name must not be empty");
+        manifest.name = name;
+      }
+      if (version !== undefined) manifest.version = version;
+      if (targetPresetName !== undefined) {
+        if (!targetPresetName) throw new ApiError(400, "INVALID_INPUT", "targetPresetName must not be empty");
+        manifest.targetPresetName = targetPresetName;
+      }
+      manifest.updatedAt = new Date().toISOString();
+      await atomicWriteFile(join(projectRoot, "project.json"), stringifyJson(manifest as unknown as JsonObject));
+      return structuredClone(manifest);
+    });
+  }
+
+  async getProjectStructure(projectId: string): Promise<ProjectStructure> {
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      return readProjectStructure(projectRoot, manifest);
+    });
+  }
+
+  async mutateProjectStructure(
+    projectId: string,
+    input: { ifRevision: string; mutation: StructureMutation },
+  ): Promise<{
+    project: ProjectManifest;
+    structure: ProjectStructure;
+    files: ProjectFileEntry[];
+    build: BuildResult;
+    snapshot: ProjectSnapshotSummary | null;
+    createdUid?: string;
+    deletedUid?: string;
+  }> {
+    if (typeof input.ifRevision !== "string" || !input.ifRevision || !input.mutation) {
+      throw new ApiError(400, "INVALID_INPUT", "ifRevision and mutation are required");
+    }
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      const currentBuild = await buildPresetProject(projectRoot);
+      if (input.ifRevision !== currentBuild.revision) {
+        throw new ApiError(409, "REVISION_CONFLICT", "Project changed since the structure was opened", {
+          expected: input.ifRevision,
+          actual: currentBuild.revision,
+        });
+      }
+
+      const stagingParent = join(this.workspaceRoot, ".staging");
+      const transactionId = randomUUID();
+      const stagedRoot = join(stagingParent, `structure-${projectId}-${transactionId}`);
+      const backupRoot = join(stagingParent, `backup-${projectId}-${transactionId}`);
+      await mkdir(stagingParent, { recursive: true });
+      try {
+        await stageManagedSources(projectRoot, stagedRoot);
+        const nextManifest = structuredClone(manifest);
+        const outcome = await applyStructureMutation(stagedRoot, nextManifest, input.mutation);
+        nextManifest.updatedAt = new Date().toISOString();
+        await atomicWriteFile(join(stagedRoot, "project.json"), stringifyJson(nextManifest as unknown as JsonObject));
+        const build = await buildPresetProject(stagedRoot);
+        const structure = await readProjectStructure(stagedRoot, nextManifest, build);
+        const snapshot = input.mutation.op === "delete"
+          ? await createProjectSnapshot(projectRoot, currentBuild, { reason: "before-item-delete" })
+          : null;
+        await installManagedSources(projectRoot, stagedRoot, backupRoot);
+        const files = await this.listFilesUnlocked(projectId);
+        return {
+          project: structuredClone(nextManifest),
+          structure,
+          files,
+          build,
+          snapshot,
+          ...(outcome.createdUid === undefined ? {} : { createdUid: outcome.createdUid }),
+          ...(outcome.deletedUid === undefined ? {} : { deletedUid: outcome.deletedUid }),
+        };
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        throw new ApiError(422, "STRUCTURE_BUILD_FAILED", "Structure mutation could not be committed", {
+          cause: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        await Promise.all([
+          rm(stagedRoot, { recursive: true, force: true }).catch(() => undefined),
+          rm(backupRoot, { recursive: true, force: true }).catch(() => undefined),
+        ]);
+      }
+    });
+  }
+
+  async listSnapshots(projectId: string): Promise<ProjectSnapshotSummary[]> {
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      await this.readManifest(projectRoot);
+      return listProjectSnapshots(projectRoot);
+    });
+  }
+
+  async createSnapshot(
+    projectId: string,
+    input: { label?: string; ifRevision: string },
+  ): Promise<ProjectSnapshotSummary> {
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      await this.readManifest(projectRoot);
+      const build = await buildPresetProject(projectRoot);
+      if (input.ifRevision !== build.revision) {
+        throw new ApiError(409, "REVISION_CONFLICT", "Project changed before the snapshot was created", {
+          expected: input.ifRevision,
+          actual: build.revision,
+        });
+      }
+      return createProjectSnapshot(projectRoot, build, {
+        reason: "manual",
+        ...(input.label === undefined ? {} : { label: input.label }),
+      });
+    });
+  }
+
+  async deleteSnapshot(projectId: string, snapshotId: string): Promise<void> {
+    const projectRoot = this.projectRoot(projectId);
+    await this.withProjectLock(projectId, async () => {
+      await this.readManifest(projectRoot);
+      await deleteProjectSnapshot(projectRoot, snapshotId);
+    });
   }
 
   async deleteProject(projectId: string): Promise<void> {
@@ -314,6 +461,22 @@ export class ProjectStore {
         used.add(displayName);
         output.set(`${group.root}/${item.uid}`, { displayName, order: index });
       }
+    }
+
+    try {
+      const snapshotIndex = JSON.parse(
+        await readFile(join(projectRoot, "snapshots", "index.json"), "utf8"),
+      ) as unknown;
+      if (isJsonObject(snapshotIndex) && Array.isArray(snapshotIndex.items)) {
+        for (let index = 0; index < snapshotIndex.items.length; index += 1) {
+          const item = snapshotIndex.items[index];
+          if (!isJsonObject(item) || typeof item.uid !== "string" || typeof item.label !== "string") continue;
+          output.set(`snapshots/${item.uid}`, { displayName: item.label, order: index });
+        }
+      }
+    } catch {
+      // Snapshot index validation belongs to the snapshot API. A broken index
+      // must not make ordinary source files inaccessible.
     }
     return output;
   }
@@ -410,92 +573,111 @@ export class ProjectStore {
           actual: currentBuild.revision,
         });
       }
+      return this.replacePresetUnlocked(
+        projectId,
+        projectRoot,
+        manifest,
+        currentBuild,
+        preset,
+        "before-source-json-apply",
+      );
+    });
+  }
 
-      const stagingParent = join(this.workspaceRoot, ".staging");
-      const transactionId = randomUUID();
-      const stagedRoot = join(stagingParent, `source-${projectId}-${transactionId}`);
-      const backupRoot = join(stagingParent, `backup-${projectId}-${transactionId}`);
-      await mkdir(stagingParent, { recursive: true });
+  private async replacePresetUnlocked(
+    projectId: string,
+    projectRoot: string,
+    manifest: ProjectManifest,
+    currentBuild: BuildResult,
+    preset: JsonObject,
+    snapshotReason: SnapshotReason,
+  ): Promise<ProjectFile> {
+    const stagingParent = join(this.workspaceRoot, ".staging");
+    const transactionId = randomUUID();
+    const stagedRoot = join(stagingParent, `source-${projectId}-${transactionId}`);
+    const backupRoot = join(stagingParent, `backup-${projectId}-${transactionId}`);
+    await mkdir(stagingParent, { recursive: true });
 
-      try {
-        const stagedManifest = await splitPresetProject(stagedRoot, projectId, {
-          preset,
-          sourceType: manifest.source.type,
-          name: manifest.name,
-          version: manifest.version,
-          ...(manifest.source.presetName ? { sourcePresetName: manifest.source.presetName } : {}),
-          ...(manifest.source.stVersion ? { sourceStVersion: manifest.source.stVersion } : {}),
+    try {
+      const stagedManifest = await splitPresetProject(stagedRoot, projectId, {
+        preset,
+        sourceType: manifest.source.type,
+        name: manifest.name,
+        version: manifest.version,
+        ...(manifest.source.presetName ? { sourcePresetName: manifest.source.presetName } : {}),
+        ...(manifest.source.stVersion ? { sourceStVersion: manifest.source.stVersion } : {}),
+      });
+      const nextManifest: ProjectManifest = {
+        ...stagedManifest,
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        createdAt: manifest.createdAt,
+        updatedAt: new Date().toISOString(),
+        source: structuredClone(manifest.source),
+        targetPresetName: manifest.targetPresetName,
+      };
+      if (manifest.originalJsonSha256) nextManifest.originalJsonSha256 = manifest.originalJsonSha256;
+      else delete nextManifest.originalJsonSha256;
+      await atomicWriteFile(join(stagedRoot, "project.json"), stringifyJson(nextManifest as unknown as JsonObject));
+      const stagedBuild = await buildPresetProject(stagedRoot);
+      if (!semanticEqual(preset, stagedBuild.preset)) {
+        throw new ApiError(500, "ROUND_TRIP_FAILED", "Applied preset did not survive semantic round trip", {
+          path: firstSemanticDifference(preset, stagedBuild.preset),
         });
-        const nextManifest: ProjectManifest = {
-          ...stagedManifest,
-          id: manifest.id,
-          name: manifest.name,
-          version: manifest.version,
-          createdAt: manifest.createdAt,
-          updatedAt: new Date().toISOString(),
-          source: structuredClone(manifest.source),
-          targetPresetName: manifest.targetPresetName,
-        };
-        if (manifest.originalJsonSha256) {
-          nextManifest.originalJsonSha256 = manifest.originalJsonSha256;
-        } else {
-          delete nextManifest.originalJsonSha256;
-        }
-        await atomicWriteFile(join(stagedRoot, "project.json"), stringifyJson(nextManifest as unknown as JsonObject));
-        const stagedBuild = await buildPresetProject(stagedRoot);
-        if (!semanticEqual(preset, stagedBuild.preset)) {
-          throw new ApiError(500, "ROUND_TRIP_FAILED", "Applied preset did not survive semantic round trip", {
-            path: firstSemanticDifference(preset, stagedBuild.preset),
-          });
-        }
-
-        await mkdir(backupRoot, { recursive: true });
-        const originalPaths = new Set<string>();
-        const installedPaths = new Set<string>();
-        try {
-          for (const managedPath of MANAGED_SOURCE_PATHS) {
-            const currentPath = join(projectRoot, managedPath);
-            const stagedPath = join(stagedRoot, managedPath);
-            const backupPath = join(backupRoot, managedPath);
-            if (await pathExists(currentPath)) {
-              await mkdir(resolve(backupPath, ".."), { recursive: true });
-              await rename(currentPath, backupPath);
-              originalPaths.add(managedPath);
-            }
-            if (await pathExists(stagedPath)) {
-              await rename(stagedPath, currentPath);
-              installedPaths.add(managedPath);
-            }
-          }
-        } catch (error) {
-          for (const managedPath of [...MANAGED_SOURCE_PATHS].reverse()) {
-            const currentPath = join(projectRoot, managedPath);
-            const backupPath = join(backupRoot, managedPath);
-            if (installedPaths.has(managedPath)) {
-              await rm(currentPath, { recursive: true, force: true }).catch(() => undefined);
-            }
-            if (originalPaths.has(managedPath) && await pathExists(backupPath)) {
-              await rename(backupPath, currentPath).catch(() => undefined);
-            }
-          }
-          throw error;
-        }
-
-        const content = stringifyJson(stagedBuild.preset);
-        return {
-          path: SOURCE_JSON_PATH,
-          content,
-          size: Buffer.byteLength(content),
-          revision: stagedBuild.revision,
-          updatedAt: nextManifest.updatedAt,
-          role: "source-json",
-        };
-      } finally {
-        await Promise.all([
-          rm(stagedRoot, { recursive: true, force: true }).catch(() => undefined),
-          rm(backupRoot, { recursive: true, force: true }).catch(() => undefined),
-        ]);
       }
+
+      await createProjectSnapshot(projectRoot, currentBuild, { reason: snapshotReason });
+      await installManagedSources(projectRoot, stagedRoot, backupRoot);
+      const content = stringifyJson(stagedBuild.preset);
+      return {
+        path: SOURCE_JSON_PATH,
+        content,
+        size: Buffer.byteLength(content),
+        revision: stagedBuild.revision,
+        updatedAt: nextManifest.updatedAt,
+        role: "source-json",
+      };
+    } finally {
+      await Promise.all([
+        rm(stagedRoot, { recursive: true, force: true }).catch(() => undefined),
+        rm(backupRoot, { recursive: true, force: true }).catch(() => undefined),
+      ]);
+    }
+  }
+
+  async restoreSnapshot(
+    projectId: string,
+    snapshotId: string,
+    input: { ifRevision: string },
+  ): Promise<{ project: ProjectManifest; structure: ProjectStructure; files: ProjectFileEntry[]; build: BuildResult }> {
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      const currentBuild = await buildPresetProject(projectRoot);
+      if (input.ifRevision !== currentBuild.revision) {
+        throw new ApiError(409, "REVISION_CONFLICT", "Project changed before the snapshot was restored", {
+          expected: input.ifRevision,
+          actual: currentBuild.revision,
+        });
+      }
+      const preset = await readSnapshotPreset(projectRoot, snapshotId);
+      await this.replacePresetUnlocked(
+        projectId,
+        projectRoot,
+        manifest,
+        currentBuild,
+        preset,
+        "before-snapshot-restore",
+      );
+      const project = await this.readManifest(projectRoot);
+      const build = await buildPresetProject(projectRoot);
+      return {
+        project,
+        structure: await readProjectStructure(projectRoot, project, build),
+        files: await this.listFilesUnlocked(projectId),
+        build,
+      };
     });
   }
 
@@ -572,7 +754,7 @@ export class ProjectStore {
           });
         }
         if (relativePath.replaceAll("\\", "/") === "project.json") {
-          if (!isJsonObject(parsed) || parsed.id !== projectId || parsed.schemaVersion !== 1) {
+          if (!isJsonObject(parsed) || parsed.id !== projectId || parsed.schemaVersion !== 2) {
             throw new ApiError(422, "INVALID_MANIFEST", "project.json cannot change its id or schema version");
           }
         }
@@ -634,6 +816,11 @@ export class ProjectStore {
     return this.withProjectLock(projectId, async () => {
       const manifest = await this.readManifest(projectRoot);
       const built = await buildPresetProject(projectRoot);
+      if (built.diagnostics.some((diagnostic) => diagnostic.level === "error")) {
+        throw new ApiError(422, "BUILD_HAS_ERRORS", "Project contains blocking build diagnostics", {
+          diagnostics: built.diagnostics,
+        });
+      }
       const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
       const name = safeExportStem(manifest.name);
       const version = manifest.version ? `-${safeExportStem(manifest.version)}` : "";

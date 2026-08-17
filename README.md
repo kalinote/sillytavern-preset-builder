@@ -13,8 +13,12 @@
 - 构建、带版本和时间戳的 JSON 导出，以及 Docker 工作区持久化。
 - Node 服务直接连接已有的 SillyTavern 1.18.x，不需要安装 ST 扩展；可列出/读取 Chat Completion presets，并从所选 preset 创建一次性工程快照。
 - 推送前生成绑定当前工程和远端目标的短时预览，用户确认后手动保存 preset 到 ST。
+- 在目录树中创建、复制、重命名、删除和排序 Prompt、Regex、Script；物理目录继续使用稳定 UUID。
+- 在检查器中局部维护高频安全属性，并用结构化 Prompt Order 编辑器维护运行时引用与启用状态。
+- 手动/自动快照、恢复与保留策略；删除条目、应用完整 JSON 和恢复前自动建立恢复点。
+- 工程设置、validate-only 构建诊断及文件定位；阻断性错误会阻止 JSON 导出与 ST 推送。
 
-Prompt/Regex 的完整结构化工作台、上下文快照、最终 Prompt/token/DOM 捕获和 PWA 仍属于后续阶段。没有 ST 页面扩展时，工具不能读取已打开页面的 DOM/Console，也不能让该页面热切换 preset；界面不会用模拟结果冒充真实 ST 运行数据。
+上下文快照、最终 Prompt/token/DOM 捕获和 PWA 仍属于后续阶段。没有 ST 页面扩展时，工具不能读取已打开页面的 DOM/Console，也不能让该页面热切换 preset；界面不会用模拟结果冒充真实 ST 运行数据。
 
 ## 连接 SillyTavern
 
@@ -90,11 +94,12 @@ preset.base.json
 prompts/<uid>/{meta.json,content.md}
 regex/<uid>/{meta.json,find.txt,replace.html}
 scripts/<uid>/{meta.json,content.js}
-snapshots/
+snapshots/index.json
+snapshots/<uid>/{meta.json,preset.json}
 recovery/
 output/
 ```
 
 文件名使用工具生成的稳定 UID，原始 identifier、显示名、顺序和未知字段保留在元数据与 manifest 中。无损定义为 JSON 语义一致，不要求字节、缩进或属性顺序一致。
 
-详细设计见 [实施方案](./docs/SillyTavern预设开发工具-实施方案.md) 和 [UI 设计说明](./docs/SillyTavern预设开发工具-UI设计说明.md)，后端协议见 [server/README.md](./server/README.md)。
+v0.2.0 的目标与事务约束见 [实施计划](./docs/Preset-Studio-v0.2.0-实施计划.md)，后端协议见 [server/README.md](./server/README.md)。

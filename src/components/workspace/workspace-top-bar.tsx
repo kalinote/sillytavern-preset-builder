@@ -8,6 +8,10 @@ import {
   FolderOpen,
   LoaderCircle,
   MoreHorizontal,
+  History,
+  Camera,
+  ShieldCheck,
+  Settings2,
   PanelLeft,
   Radio,
   RadioTower,
@@ -44,6 +48,11 @@ interface WorkspaceTopBarProps {
   onDownloadProject: () => void;
   onOpenConnection: () => void;
   onPush: () => void;
+  diagnosticsBlocking?: boolean;
+  onValidate: () => void;
+  onCreateSnapshot: () => void;
+  onOpenSnapshots: () => void;
+  onOpenSettings: () => void;
 }
 
 export function WorkspaceTopBar({
@@ -62,11 +71,26 @@ export function WorkspaceTopBar({
   onDownloadProject,
   onOpenConnection,
   onPush,
+  diagnosticsBlocking = false,
+  onValidate,
+  onCreateSnapshot,
+  onOpenSnapshots,
+  onOpenSettings,
 }: WorkspaceTopBarProps) {
   const stConnected = stConnection?.status === "connected";
   return (
     <header className="relative z-40 flex h-15 shrink-0 items-center border-b border-border bg-surface px-3 sm:px-4">
       <div className="flex min-w-0 items-center gap-2.5">
+        <Button
+          variant="secondary"
+          size="sm"
+          className="hidden h-10 lg:inline-flex"
+          onClick={onValidate}
+          disabled={!hasProject}
+        >
+          <ShieldCheck />验证工程
+        </Button>
+
         <Button
           variant="ghost"
           size="icon-sm"
@@ -137,13 +161,23 @@ export function WorkspaceTopBar({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuLabel>工程输出</DropdownMenuLabel>
-            <DropdownMenuItem onSelect={onExport} disabled={!hasProject}>
+            <DropdownMenuItem onSelect={onExport} disabled={!hasProject || diagnosticsBlocking}>
               <FileJson2 />
               构建并导出 Preset JSON
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onDownloadProject} disabled={!hasProject}>
               <FileArchive />
               下载工程包
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onCreateSnapshot} disabled={!hasProject}>
+              <Camera />创建快照
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onOpenSnapshots} disabled={!hasProject}>
+              <History />快照历史
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onOpenSettings} disabled={!hasProject}>
+              <Settings2 />工程设置
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={onOpenProjects}>
@@ -160,7 +194,7 @@ export function WorkspaceTopBar({
         <Button
           size="sm"
           onClick={onPush}
-          disabled={!stConnected || !pushAvailable}
+          disabled={!stConnected || !pushAvailable || diagnosticsBlocking}
           title={!stConnected ? "请先连接 SillyTavern" : !hasProject ? "请先打开工程" : undefined}
           className="hidden md:inline-flex"
         >
@@ -188,15 +222,27 @@ export function WorkspaceTopBar({
               <Radio />
               {stConnected ? `ST ${stConnection.version ?? "已连接"} 连接详情` : "连接 SillyTavern"}
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onExport} disabled={!hasProject}>
+            <DropdownMenuItem onSelect={onExport} disabled={!hasProject || diagnosticsBlocking}>
               <FileJson2 />
               导出 JSON
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onValidate} disabled={!hasProject}>
+              <ShieldCheck />验证工程
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onCreateSnapshot} disabled={!hasProject}>
+              <Camera />创建快照
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onOpenSnapshots} disabled={!hasProject}>
+              <History />快照历史
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onOpenSettings} disabled={!hasProject}>
+              <Settings2 />工程设置
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onDownloadProject} disabled={!hasProject}>
               <FileArchive />
               下载工程包
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onPush} disabled={!stConnected || !pushAvailable}>
+            <DropdownMenuItem onSelect={onPush} disabled={!stConnected || !pushAvailable || diagnosticsBlocking}>
               <RadioTower />
               保存 Preset 到 ST
             </DropdownMenuItem>

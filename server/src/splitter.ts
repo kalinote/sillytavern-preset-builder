@@ -21,6 +21,7 @@ import type {
   RegexIndexItem,
   RegexMirrorBinding,
   ScriptIndexItem,
+  SnapshotIndex,
 } from "./types.js";
 
 interface RegexDetection {
@@ -137,7 +138,7 @@ function makeManifest(
     ...(input.sourceStVersion ? { stVersion: input.sourceStVersion } : {}),
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id,
     name,
     version: input.version?.trim() ?? "",
@@ -312,6 +313,8 @@ export async function splitPresetProject(
     mkdir(join(projectRoot, "recovery"), { recursive: true }),
     mkdir(join(projectRoot, "output"), { recursive: true }),
   ]);
+  const snapshotIndex: SnapshotIndex = { schemaVersion: 1, items: [] };
+  await writeJson(join(projectRoot, "snapshots", "index.json"), snapshotIndex as unknown as JsonValue);
   await writeJson(join(projectRoot, "preset.base.json"), base);
   await splitPrompts(projectRoot, original.prompts as JsonValue[], regexDetection);
   await writeJson(join(projectRoot, "prompts", "prompt-order.json"), original.prompt_order as JsonValue);

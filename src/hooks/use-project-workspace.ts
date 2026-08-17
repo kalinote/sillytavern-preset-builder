@@ -23,7 +23,12 @@ import {
   type ProjectExportResult,
   type ProjectFile,
   type ProjectFileEntry,
+  type ProjectDiagnostic,
+  type ProjectSnapshotSummary,
+  type ProjectStructure,
   type ProjectSummary,
+  type StructureMutation,
+  type UpdateProjectInput,
 } from "../lib/project-api";
 
 export type WorkspaceSaveState =
@@ -100,6 +105,12 @@ export interface UseProjectWorkspaceResult {
   isLoadingProject: boolean;
   isLoadingFile: boolean;
   isLoading: boolean;
+  structure: ProjectStructure | null;
+  structureLoading: boolean;
+  structureMutation: "idle" | "saving" | "error";
+  diagnostics: ProjectDiagnostic[];
+  diagnosticsStale: boolean;
+  snapshots: ProjectSnapshotSummary[];
   refreshProjects: () => Promise<ProjectSummary[]>;
   openProject: (
     projectId: string,
@@ -125,6 +136,13 @@ export interface UseProjectWorkspaceResult {
   buildProject: (input?: BuildProjectInput) => Promise<ProjectBuildResult>;
   exportProject: (input?: ExportProjectInput) => Promise<ProjectExportResult>;
   downloadProjectArchive: () => Promise<ProjectArchiveDownload>;
+  refreshStructure: () => Promise<ProjectStructure>;
+  mutateStructure: (mutation: StructureMutation) => Promise<void>;
+  validateProject: () => Promise<ProjectBuildResult>;
+  updateProjectSettings: (input: Omit<UpdateProjectInput, "ifProjectRevision">) => Promise<Project>;
+  createSnapshot: (label?: string) => Promise<ProjectSnapshotSummary>;
+  restoreSnapshot: (snapshotId: string) => Promise<void>;
+  deleteSnapshot: (snapshotId: string) => Promise<void>;
   clearError: () => void;
 }
 
@@ -193,6 +211,12 @@ export function useProjectWorkspace(
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
   const [isLoadingProject, setIsLoadingProject] = useState(false);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [structure, setStructure] = useState<ProjectStructure | null>(null);
+  const [structureLoading, setStructureLoading] = useState(false);
+  const [structureMutation, setStructureMutation] = useState<"idle" | "saving" | "error">("idle");
+  const [diagnostics, setDiagnostics] = useState<ProjectDiagnostic[]>([]);
+  const [diagnosticsStale, setDiagnosticsStale] = useState(true);
+  const [snapshots, setSnapshots] = useState<ProjectSnapshotSummary[]>([]);
 
   const mountedRef = useRef(false);
   const projectRef = useRef<Project | null>(null);
@@ -206,6 +230,7 @@ export function useProjectWorkspace(
   const projectAbortRef = useRef<AbortController | null>(null);
   const fileAbortRef = useRef<AbortController | null>(null);
   const onErrorRef = useRef(options.onError);
+  const structureRef = useRef<ProjectStructure | null>(null);
 
   useEffect(() => {
     onErrorRef.current = options.onError;
@@ -275,15 +300,21 @@ export function useProjectWorkspace(
         const current = activeFileRef.current;
 
         if (isSourceJsonFile(savedFile)) {
-          const [updatedProject, updatedFiles] = await Promise.all([
+          const [updatedProject, updatedFiles, updatedStructure, updatedSnapshots] = await Promise.all([
             api.getProject(savedProjectId),
             api.listProjectFiles(savedProjectId),
+            api.getProjectStructure(savedProjectId),
+            api.listSnapshots(savedProjectId),
           ]);
           if (projectRef.current?.id === savedProjectId) {
             projectRef.current = updatedProject;
             if (mountedRef.current) {
               setProject(updatedProject);
               setFiles(updatedFiles);
+              structureRef.current = updatedStructure;
+              setStructure(updatedStructure);
+              setSnapshots(updatedSnapshots);
+              setDiagnosticsStale(true);
               setProjects((projects) => mergeProjectSummary(projects, updatedProject));
             }
           }
@@ -315,6 +346,7 @@ export function useProjectWorkspace(
                     : file,
                 ),
               );
+              setDiagnosticsStale(true);
             }
             setSaveState(dirtyRef.current ? "dirty" : "saved");
             setIsDirty(dirtyRef.current);
@@ -370,6 +402,7 @@ export function useProjectWorkspace(
       setSaveState("dirty");
       setError(null);
       if (!isSourceJsonFile(activeFileRef.current)) scheduleAutosave();
+      setDiagnosticsStale(true);
     },
     [scheduleAutosave],
   );
@@ -430,13 +463,16 @@ export function useProjectWorkspace(
       projectAbortRef.current = controller;
       if (mountedRef.current) {
         setIsLoadingProject(true);
+        setStructureLoading(true);
         setError(null);
       }
 
       try {
-        const [loadedProject, loadedFiles] = await Promise.all([
+        const [loadedProject, loadedFiles, loadedStructure, loadedSnapshots] = await Promise.all([
           api.getProject(projectId, { signal: controller.signal }),
           api.listProjectFiles(projectId, { signal: controller.signal }),
+          api.getProjectStructure(projectId, { signal: controller.signal }),
+          api.listSnapshots(projectId, { signal: controller.signal }),
         ]);
         if (
           controller.signal.aborted ||
@@ -468,6 +504,11 @@ export function useProjectWorkspace(
         forgetClosedWorkspace();
         setProject(loadedProject);
         setFiles(loadedFiles);
+        structureRef.current = loadedStructure;
+        setStructure(loadedStructure);
+        setSnapshots(loadedSnapshots);
+        setDiagnostics([]);
+        setDiagnosticsStale(true);
         setProjects((current) =>
           mergeProjectSummary(current, loadedProject),
         );
@@ -480,6 +521,7 @@ export function useProjectWorkspace(
         if (projectAbortRef.current === controller) {
           projectAbortRef.current = null;
           if (mountedRef.current) setIsLoadingProject(false);
+          if (mountedRef.current) setStructureLoading(false);
         }
       }
     },
@@ -594,13 +636,114 @@ export function useProjectWorkspace(
     [api, flushBeforeOperation, openProject, reportError],
   );
 
+  const refreshStructure = useCallback(async () => {
+    await flushBeforeOperation();
+    const currentProject = projectRef.current;
+    if (!currentProject) throw new Error("No project is currently open");
+    if (mountedRef.current) setStructureLoading(true);
+    try {
+      const loaded = await api.getProjectStructure(currentProject.id);
+      structureRef.current = loaded;
+      if (mountedRef.current) setStructure(loaded);
+      return loaded;
+    } catch (caught) {
+      reportError(caught);
+      throw caught;
+    } finally {
+      if (mountedRef.current) setStructureLoading(false);
+    }
+  }, [api, flushBeforeOperation, reportError]);
+
+  const mutateStructure = useCallback(async (mutation: StructureMutation) => {
+    await flushBeforeOperation();
+    const currentProject = projectRef.current;
+    const currentStructure = structureRef.current;
+    if (!currentProject || !currentStructure) throw new Error("No project structure is currently open");
+    if (mountedRef.current) {
+      setStructureMutation("saving");
+      setError(null);
+    }
+    const previousActivePath = activeFileRef.current?.path;
+    try {
+      const result = await api.mutateProjectStructure(
+        currentProject.id,
+        currentStructure.revision,
+        mutation,
+      );
+      projectRef.current = result.project;
+      structureRef.current = result.structure;
+      if (mountedRef.current) {
+        setProject(result.project);
+        setProjects((items) => mergeProjectSummary(items, result.project));
+        setFiles(result.files);
+        setStructure(result.structure);
+        setDiagnostics(result.build.diagnostics);
+        setDiagnosticsStale(false);
+        if (result.snapshot) setSnapshots((items) => [...items, result.snapshot as ProjectSnapshotSummary]);
+      }
+
+      let targetPath = previousActivePath;
+      if (result.createdUid && mutation.op !== "set-prompt-order") {
+        targetPath = mutation.kind === "prompt"
+          ? `prompts/${result.createdUid}/content.md`
+          : mutation.kind === "regex"
+            ? `regex/${result.createdUid}/find.txt`
+            : `scripts/${result.createdUid}/content.js`;
+      } else if (mutation.op === "delete" && previousActivePath?.startsWith(
+        `${mutation.kind === "prompt" ? "prompts" : mutation.kind === "regex" ? "regex" : "scripts"}/${mutation.uid}/`,
+      )) {
+        const collection = mutation.kind === "prompt"
+          ? result.structure.prompts
+          : mutation.kind === "regex"
+            ? result.structure.regex
+            : result.structure.scripts;
+        const previousCollection = mutation.kind === "prompt"
+          ? currentStructure.prompts
+          : mutation.kind === "regex"
+            ? currentStructure.regex
+            : currentStructure.scripts;
+        const oldIndex = previousCollection.findIndex((item) => item.uid === mutation.uid);
+        const neighbor = collection[Math.min(Math.max(0, oldIndex), Math.max(0, collection.length - 1))];
+        targetPath = neighbor
+          ? mutation.kind === "prompt"
+            ? `prompts/${neighbor.uid}/content.md`
+            : mutation.kind === "regex"
+              ? `regex/${neighbor.uid}/find.txt`
+              : `scripts/${neighbor.uid}/content.js`
+          : `${mutation.kind === "prompt" ? "prompts" : mutation.kind === "regex" ? "regex" : "scripts"}/index.json`;
+      } else if (mutation.op === "patch" && previousActivePath?.endsWith("/meta.json")) {
+        targetPath = previousActivePath;
+      } else if (mutation.op === "set-prompt-order" && previousActivePath === "prompts/prompt-order.json") {
+        targetPath = previousActivePath;
+      }
+
+      if (targetPath && result.files.some((file) => file.kind === "file" && file.path === targetPath)) {
+        const loaded = await api.getProjectFile(result.project.id, targetPath);
+        applyLoadedFile(loaded);
+      } else if (previousActivePath && !result.files.some((file) => file.kind === "file" && file.path === previousActivePath)) {
+        const fallback = firstEditableFile(result.files);
+        applyLoadedFile(fallback ? await api.getProjectFile(result.project.id, fallback.path) : null);
+      }
+      if (mountedRef.current) setStructureMutation("idle");
+    } catch (caught) {
+      if (mountedRef.current) setStructureMutation("error");
+      reportError(caught);
+      throw caught;
+    }
+  }, [api, applyLoadedFile, flushBeforeOperation, reportError]);
+
   const buildProject = useCallback(
     async (input?: BuildProjectInput) => {
       await flushBeforeOperation();
       const currentProject = projectRef.current;
       if (!currentProject) throw new Error("No project is currently open");
       try {
-        return await api.buildProject(currentProject.id, input);
+        const result = await api.buildProject(currentProject.id, input);
+        if (mountedRef.current) {
+          setDiagnostics(result.diagnostics);
+          setDiagnosticsStale(false);
+        }
+        return result;
       } catch (caught) {
         reportError(caught);
         throw caught;
@@ -608,6 +751,106 @@ export function useProjectWorkspace(
     },
     [api, flushBeforeOperation, reportError],
   );
+
+  const validateProject = useCallback(
+    () => buildProject({ validateOnly: true }),
+    [buildProject],
+  );
+
+  const updateProjectSettings = useCallback(async (
+    input: Omit<UpdateProjectInput, "ifProjectRevision">,
+  ) => {
+    await flushBeforeOperation();
+    const currentProject = projectRef.current;
+    if (!currentProject) throw new Error("No project is currently open");
+    try {
+      const updated = await api.updateProject(currentProject.id, {
+        ...input,
+        ifProjectRevision: currentProject.updatedAt,
+      });
+      projectRef.current = updated;
+      if (structureRef.current) {
+        structureRef.current = { ...structureRef.current, projectRevision: updated.updatedAt };
+      }
+      if (mountedRef.current) {
+        setProject(updated);
+        setProjects((items) => mergeProjectSummary(items, updated));
+        setStructure(structureRef.current);
+      }
+      return updated;
+    } catch (caught) {
+      reportError(caught);
+      throw caught;
+    }
+  }, [api, flushBeforeOperation, reportError]);
+
+  const createSnapshot = useCallback(async (label?: string) => {
+    await flushBeforeOperation();
+    const currentProject = projectRef.current;
+    const currentStructure = structureRef.current;
+    if (!currentProject || !currentStructure) throw new Error("No project is currently open");
+    try {
+      const created = await api.createSnapshot(currentProject.id, {
+        ifRevision: currentStructure.revision,
+        ...(label === undefined ? {} : { label }),
+      });
+      const updatedFiles = await api.listProjectFiles(currentProject.id);
+      if (mountedRef.current) {
+        setSnapshots((items) => [...items, created]);
+        setFiles(updatedFiles);
+      }
+      return created;
+    } catch (caught) {
+      reportError(caught);
+      throw caught;
+    }
+  }, [api, flushBeforeOperation, reportError]);
+
+  const restoreSnapshot = useCallback(async (snapshotId: string) => {
+    await flushBeforeOperation();
+    const currentProject = projectRef.current;
+    const currentStructure = structureRef.current;
+    if (!currentProject || !currentStructure) throw new Error("No project is currently open");
+    try {
+      const result = await api.restoreSnapshot(currentProject.id, snapshotId, currentStructure.revision);
+      const nextSnapshots = await api.listSnapshots(currentProject.id);
+      const previousPath = activeFileRef.current?.path;
+      const selected = result.files.find((file) => file.kind === "file" && file.path === previousPath)
+        ?? firstEditableFile(result.files);
+      const loaded = selected ? await api.getProjectFile(currentProject.id, selected.path) : null;
+      projectRef.current = result.project;
+      structureRef.current = result.structure;
+      if (mountedRef.current) {
+        setProject(result.project);
+        setProjects((items) => mergeProjectSummary(items, result.project));
+        setFiles(result.files);
+        setStructure(result.structure);
+        setSnapshots(nextSnapshots);
+        setDiagnostics(result.build.diagnostics);
+        setDiagnosticsStale(false);
+      }
+      applyLoadedFile(loaded);
+    } catch (caught) {
+      reportError(caught);
+      throw caught;
+    }
+  }, [api, applyLoadedFile, flushBeforeOperation, reportError]);
+
+  const deleteSnapshot = useCallback(async (snapshotId: string) => {
+    const currentProject = projectRef.current;
+    if (!currentProject) throw new Error("No project is currently open");
+    try {
+      await api.deleteSnapshot(currentProject.id, snapshotId);
+      const updatedFiles = await api.listProjectFiles(currentProject.id);
+      if (mountedRef.current) {
+        setSnapshots((items) => items.filter((item) => item.uid !== snapshotId));
+        setFiles(updatedFiles);
+      }
+    } catch (caught) {
+      reportError(caught);
+      throw caught;
+    }
+  }, [api, reportError]);
 
   const exportProject = useCallback(
     async (input?: ExportProjectInput) => {
@@ -651,8 +894,14 @@ export function useProjectWorkspace(
     projectAbortRef.current = null;
     fileAbortRef.current = null;
     projectRef.current = null;
+    structureRef.current = null;
     setProject(null);
     setFiles([]);
+    setStructure(null);
+    setSnapshots([]);
+    setDiagnostics([]);
+    setDiagnosticsStale(true);
+    setStructureMutation("idle");
     applyLoadedFile(null);
     setIsLoadingProject(false);
     setIsLoadingFile(false);
@@ -755,6 +1004,12 @@ export function useProjectWorkspace(
     isLoadingProject,
     isLoadingFile,
     isLoading: isLoadingProjects || isLoadingProject || isLoadingFile,
+    structure,
+    structureLoading,
+    structureMutation,
+    diagnostics,
+    diagnosticsStale,
+    snapshots,
     refreshProjects,
     openProject,
     closeProject,
@@ -771,6 +1026,13 @@ export function useProjectWorkspace(
     buildProject,
     exportProject,
     downloadProjectArchive,
+    refreshStructure,
+    mutateStructure,
+    validateProject,
+    updateProjectSettings,
+    createSnapshot,
+    restoreSnapshot,
+    deleteSnapshot,
     clearError,
   };
 }

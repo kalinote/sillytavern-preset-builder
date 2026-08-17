@@ -69,6 +69,86 @@ export interface BuildArtifact {
   revision: string;
 }
 
+export type ProjectItemKind = "prompt" | "regex" | "script";
+
+export interface PromptStructureItem {
+  kind: "prompt";
+  uid: string;
+  order: number;
+  name?: string;
+  identifier?: string;
+  role?: string;
+  enabled?: boolean;
+  marker?: JsonValue;
+}
+
+export interface RegexStructureItem {
+  kind: "regex";
+  uid: string;
+  order: number;
+  name?: string;
+  id?: string;
+  disabled?: boolean;
+  runOnEdit?: boolean;
+  placement?: JsonValue;
+  minDepth?: number;
+  maxDepth?: number;
+}
+
+export interface ScriptStructureItem {
+  kind: "script";
+  uid: string;
+  order: number;
+  name?: string;
+  id?: string;
+  enabled?: boolean;
+}
+
+export interface ProjectStructure {
+  projectId: string;
+  projectRevision: string;
+  revision: string;
+  prompts: PromptStructureItem[];
+  regex: RegexStructureItem[];
+  scripts: ScriptStructureItem[];
+  promptOrder: JsonValue[];
+}
+
+export type StructureMutation =
+  | { op: "create"; kind: ProjectItemKind; afterUid?: string; template?: "blank" }
+  | { op: "duplicate"; kind: ProjectItemKind; uid: string }
+  | { op: "patch"; kind: ProjectItemKind; uid: string; patch: Record<string, JsonValue> }
+  | { op: "delete"; kind: ProjectItemKind; uid: string; removePromptOrderReferences?: boolean }
+  | { op: "reorder"; kind: ProjectItemKind; uids: string[] }
+  | { op: "set-prompt-order"; promptOrder: JsonValue[] };
+
+export interface ProjectSnapshotSummary {
+  uid: string;
+  label: string;
+  kind: "manual" | "automatic";
+  reason: "manual" | "before-item-delete" | "before-source-json-apply" | "before-snapshot-restore";
+  createdAt: string;
+  presetRevision: string;
+  size: number;
+}
+
+export interface StructureMutationResult {
+  project: Project;
+  structure: ProjectStructure;
+  files: ProjectFileEntry[];
+  build: { revision: string; size: number; diagnostics: ProjectDiagnostic[] };
+  snapshot: ProjectSnapshotSummary | null;
+  createdUid?: string;
+  deletedUid?: string;
+}
+
+export interface SnapshotRestoreResult {
+  project: Project;
+  structure: ProjectStructure;
+  files: ProjectFileEntry[];
+  build: { revision: string; size: number; diagnostics: ProjectDiagnostic[] };
+}
+
 export interface ProjectBuildResult {
   success: boolean;
   preset: JsonValue;
@@ -144,6 +224,13 @@ export interface UpdateProjectFileInput {
   revision?: string | null;
 }
 
+export interface UpdateProjectInput {
+  ifProjectRevision: string;
+  name?: string;
+  version?: string;
+  targetPresetName?: string;
+}
+
 export interface BuildProjectInput {
   validateOnly?: boolean;
 }
@@ -181,6 +268,11 @@ export interface ProjectApi {
     projectId: string,
     options?: ProjectRequestOptions,
   ): Promise<Project>;
+  updateProject(
+    projectId: string,
+    input: UpdateProjectInput,
+    options?: ProjectRequestOptions,
+  ): Promise<Project>;
   deleteProject(
     projectId: string,
     options?: ProjectRequestOptions,
@@ -200,6 +292,26 @@ export interface ProjectApi {
     input: UpdateProjectFileInput,
     options?: ProjectRequestOptions,
   ): Promise<ProjectFile>;
+  getProjectStructure(projectId: string, options?: ProjectRequestOptions): Promise<ProjectStructure>;
+  mutateProjectStructure(
+    projectId: string,
+    ifRevision: string,
+    mutation: StructureMutation,
+    options?: ProjectRequestOptions,
+  ): Promise<StructureMutationResult>;
+  listSnapshots(projectId: string, options?: ProjectRequestOptions): Promise<ProjectSnapshotSummary[]>;
+  createSnapshot(
+    projectId: string,
+    input: { ifRevision: string; label?: string },
+    options?: ProjectRequestOptions,
+  ): Promise<ProjectSnapshotSummary>;
+  restoreSnapshot(
+    projectId: string,
+    snapshotId: string,
+    ifRevision: string,
+    options?: ProjectRequestOptions,
+  ): Promise<SnapshotRestoreResult>;
+  deleteSnapshot(projectId: string, snapshotId: string, options?: ProjectRequestOptions): Promise<void>;
   buildProject(
     projectId: string,
     input?: BuildProjectInput,
@@ -303,6 +415,16 @@ export const PROJECT_API_ENDPOINTS = {
     `${API_ROOT}/${encodeProjectId(projectId)}/export`,
   archive: (projectId: string) =>
     `${API_ROOT}/${encodeProjectId(projectId)}/archive`,
+  structure: (projectId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/structure`,
+  mutations: (projectId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/structure/mutations`,
+  snapshots: (projectId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/snapshots`,
+  snapshot: (projectId: string, snapshotId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/snapshots/${encodeURIComponent(snapshotId)}`,
+  restoreSnapshot: (projectId: string, snapshotId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/restore`,
 } as const;
 
 interface ApiResponse {
@@ -503,6 +625,124 @@ function parseDiagnostics(value: unknown) {
   return Array.isArray(value) ? value.map(parseDiagnostic) : [];
 }
 
+function parseSnapshot(value: unknown): ProjectSnapshotSummary {
+  if (!isRecord(value)) throw new TypeError("Snapshot response must be an object");
+  const kind = value.kind === "automatic" ? "automatic" : "manual";
+  const reasons = new Set([
+    "manual",
+    "before-item-delete",
+    "before-source-json-apply",
+    "before-snapshot-restore",
+  ]);
+  const reason = typeof value.reason === "string" && reasons.has(value.reason)
+    ? value.reason as ProjectSnapshotSummary["reason"]
+    : "manual";
+  return {
+    uid: requiredString(value, "uid", "snapshot"),
+    label: requiredString(value, "label", "snapshot"),
+    kind,
+    reason,
+    createdAt: requiredString(value, "createdAt", "snapshot"),
+    presetRevision: requiredString(value, "presetRevision", "snapshot"),
+    size: optionalNumber(value.size) ?? 0,
+  };
+}
+
+function parseStructureItem(value: unknown, kind: "prompt"): PromptStructureItem;
+function parseStructureItem(value: unknown, kind: "regex"): RegexStructureItem;
+function parseStructureItem(value: unknown, kind: "script"): ScriptStructureItem;
+function parseStructureItem(value: unknown, kind: ProjectItemKind) {
+  if (!isRecord(value)) throw new TypeError(`${kind} structure item must be an object`);
+  const base = {
+    kind,
+    uid: requiredString(value, "uid", `${kind} item`),
+    order: optionalNumber(value.order) ?? 0,
+  };
+  if (kind === "prompt") {
+    return {
+      ...base,
+      kind,
+      ...(typeof value.name === "string" ? { name: value.name } : {}),
+      ...(typeof value.identifier === "string" ? { identifier: value.identifier } : {}),
+      ...(typeof value.role === "string" ? { role: value.role } : {}),
+      ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {}),
+      ...(value.marker === undefined ? {} : { marker: value.marker as JsonValue }),
+    } satisfies PromptStructureItem;
+  }
+  if (kind === "regex") {
+    return {
+      ...base,
+      kind,
+      ...(typeof value.name === "string" ? { name: value.name } : {}),
+      ...(typeof value.id === "string" ? { id: value.id } : {}),
+      ...(typeof value.disabled === "boolean" ? { disabled: value.disabled } : {}),
+      ...(typeof value.runOnEdit === "boolean" ? { runOnEdit: value.runOnEdit } : {}),
+      ...(value.placement === undefined ? {} : { placement: value.placement as JsonValue }),
+      ...(typeof value.minDepth === "number" ? { minDepth: value.minDepth } : {}),
+      ...(typeof value.maxDepth === "number" ? { maxDepth: value.maxDepth } : {}),
+    } satisfies RegexStructureItem;
+  }
+  return {
+    ...base,
+    kind,
+    ...(typeof value.name === "string" ? { name: value.name } : {}),
+    ...(typeof value.id === "string" ? { id: value.id } : {}),
+    ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {}),
+  } satisfies ScriptStructureItem;
+}
+
+function parseProjectStructure(value: unknown): ProjectStructure {
+  if (!isRecord(value)) throw new TypeError("Project structure response must be an object");
+  if (!Array.isArray(value.prompts) || !Array.isArray(value.regex) || !Array.isArray(value.scripts)) {
+    throw new TypeError("Project structure collections must be arrays");
+  }
+  return {
+    projectId: requiredString(value, "projectId", "structure"),
+    projectRevision: requiredString(value, "projectRevision", "structure"),
+    revision: requiredString(value, "revision", "structure"),
+    prompts: value.prompts.map((item) => parseStructureItem(item, "prompt")),
+    regex: value.regex.map((item) => parseStructureItem(item, "regex")),
+    scripts: value.scripts.map((item) => parseStructureItem(item, "script")),
+    promptOrder: Array.isArray(value.promptOrder) ? value.promptOrder as JsonValue[] : [],
+  };
+}
+
+function parseBuildSummary(value: unknown) {
+  if (!isRecord(value)) throw new TypeError("Build summary must be an object");
+  return {
+    revision: requiredString(value, "revision", "build"),
+    size: optionalNumber(value.size) ?? 0,
+    diagnostics: parseDiagnostics(value.diagnostics),
+  };
+}
+
+function parseMutationResult(value: unknown): StructureMutationResult {
+  if (!isRecord(value)) throw new TypeError("Mutation response must be an object");
+  const files = value.files;
+  if (!Array.isArray(files)) throw new TypeError("Mutation response files must be an array");
+  return {
+    project: parseProject(value.project),
+    structure: parseProjectStructure(value.structure),
+    files: files.map(parseFileEntry),
+    build: parseBuildSummary(value.build),
+    snapshot: value.snapshot == null ? null : parseSnapshot(value.snapshot),
+    ...(typeof value.createdUid === "string" ? { createdUid: value.createdUid } : {}),
+    ...(typeof value.deletedUid === "string" ? { deletedUid: value.deletedUid } : {}),
+  };
+}
+
+function parseSnapshotRestoreResult(value: unknown): SnapshotRestoreResult {
+  if (!isRecord(value) || !Array.isArray(value.files)) {
+    throw new TypeError("Snapshot restore response must be an object");
+  }
+  return {
+    project: parseProject(value.project),
+    structure: parseProjectStructure(value.structure),
+    files: value.files.map(parseFileEntry),
+    build: parseBuildSummary(value.build),
+  };
+}
+
 function parseBuildResult(value: unknown): ProjectBuildResult {
   if (!isRecord(value)) throw new TypeError("Build response must be an object");
 
@@ -514,6 +754,12 @@ function parseBuildResult(value: unknown): ProjectBuildResult {
         : {}),
       size: optionalNumber(value.artifact.size) ?? 0,
       revision: requiredString(value.artifact, "revision", "artifact"),
+    };
+  }
+  if (artifact === null && typeof value.revision === "string") {
+    artifact = {
+      size: optionalNumber(value.size) ?? 0,
+      revision: value.revision,
     };
   }
 
@@ -804,6 +1050,20 @@ export class ProjectApiClient implements ProjectApi {
     return parseProject(unwrap(payload, "project"));
   }
 
+  async updateProject(
+    projectId: string,
+    input: UpdateProjectInput,
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.project(projectId), {
+      method: "PATCH",
+      signal: options.signal,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return parseProject(unwrap(payload, "project"));
+  }
+
   async deleteProject(
     projectId: string,
     options: ProjectRequestOptions = {},
@@ -887,6 +1147,85 @@ export class ProjectApiClient implements ProjectApi {
       path,
       content: input.content,
       revision: response.headers.get("etag") ?? input.revision ?? null,
+    });
+  }
+
+  async getProjectStructure(
+    projectId: string,
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.structure(projectId), {
+      method: "GET",
+      signal: options.signal,
+      headers: { Accept: "application/json" },
+    });
+    return parseProjectStructure(unwrap(payload, "structure"));
+  }
+
+  async mutateProjectStructure(
+    projectId: string,
+    ifRevision: string,
+    mutation: StructureMutation,
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.mutations(projectId), {
+      method: "POST",
+      signal: options.signal,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ ifRevision, mutation }),
+    });
+    return parseMutationResult(payload);
+  }
+
+  async listSnapshots(projectId: string, options: ProjectRequestOptions = {}) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.snapshots(projectId), {
+      method: "GET",
+      signal: options.signal,
+      headers: { Accept: "application/json" },
+    });
+    const snapshots = unwrap(payload, "snapshots");
+    if (!Array.isArray(snapshots)) throw new TypeError("Snapshot list response must contain an array");
+    return snapshots.map(parseSnapshot);
+  }
+
+  async createSnapshot(
+    projectId: string,
+    input: { ifRevision: string; label?: string },
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.snapshots(projectId), {
+      method: "POST",
+      signal: options.signal,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return parseSnapshot(unwrap(payload, "snapshot"));
+  }
+
+  async restoreSnapshot(
+    projectId: string,
+    snapshotId: string,
+    ifRevision: string,
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.restoreSnapshot(projectId, snapshotId), {
+      method: "POST",
+      signal: options.signal,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ ifRevision }),
+    });
+    return parseSnapshotRestoreResult(payload);
+  }
+
+  async deleteSnapshot(
+    projectId: string,
+    snapshotId: string,
+    options: ProjectRequestOptions = {},
+  ) {
+    await this.request(PROJECT_API_ENDPOINTS.snapshot(projectId, snapshotId), {
+      method: "DELETE",
+      signal: options.signal,
+      headers: { Accept: "application/json" },
     });
   }
 

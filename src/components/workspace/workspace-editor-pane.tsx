@@ -9,10 +9,13 @@ import {
   LoaderCircle,
   Save,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import type { ProjectStructure, StructureMutation } from "../../lib/project-api";
 import { AdaptiveCodeEditor } from "../editor";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { PromptOrderEditor } from "./prompt-order-editor";
 
 export type SaveState = "saved" | "saving" | "dirty" | "error";
 
@@ -29,6 +32,9 @@ interface WorkspaceEditorPaneProps {
   onChange: (content: string) => void;
   onFlush: () => void;
   onApply?: () => void;
+  structure?: ProjectStructure | null;
+  structureBusy?: boolean;
+  onMutateStructure?: (mutation: StructureMutation) => void;
 }
 
 export function WorkspaceEditorPane({
@@ -44,12 +50,18 @@ export function WorkspaceEditorPane({
   onChange,
   onFlush,
   onApply,
+  structure,
+  structureBusy,
+  onMutateStructure,
 }: WorkspaceEditorPaneProps) {
   const filename = path.split("/").at(-1) ?? path;
   const language = languageFromPath(path);
   const largeFile = Math.max(size, content.length) > 1_000_000;
   const readOnly = path.startsWith("output/") || path.startsWith("snapshots/");
   const FileIcon = iconFromLanguage(language);
+  const promptOrderFile = path === "prompts/prompt-order.json";
+  const [promptOrderMode, setPromptOrderMode] = useState<"source" | "structured">("source");
+  useEffect(() => setPromptOrderMode("source"), [path]);
 
   return (
     <main
@@ -94,6 +106,12 @@ export function WorkspaceEditorPane({
             应用并重新拆分
           </Button>
         ) : null}
+        {promptOrderFile && structure && onMutateStructure ? (
+          <div className="flex rounded-lg border border-border bg-muted/40 p-0.5">
+            <Button variant={promptOrderMode === "source" ? "secondary" : "ghost"} size="sm" className="h-7" onClick={() => setPromptOrderMode("source")}>源码</Button>
+            <Button variant={promptOrderMode === "structured" ? "secondary" : "ghost"} size="sm" className="h-7" onClick={() => setPromptOrderMode("structured")}>结构化</Button>
+          </div>
+        ) : null}
       </div>
 
       {saveMode === "explicit" ? (
@@ -118,7 +136,7 @@ export function WorkspaceEditorPane({
       )}
 
       <div
-        className="min-h-0 flex-1"
+        className="flex min-h-0 flex-1"
         onBlurCapture={(event) => {
           const nextTarget = event.relatedTarget;
           if (
@@ -130,16 +148,24 @@ export function WorkspaceEditorPane({
           if (saveMode === "auto") onFlush();
         }}
       >
-        <AdaptiveCodeEditor
-          key={path}
-          value={content}
-          onChange={onChange}
-          language={language}
-          readOnly={readOnly}
-          largeFile={largeFile}
-          viewStateKey={viewStateKey}
-          ariaLabel={`${filename} 源码编辑器`}
-        />
+        {promptOrderFile && promptOrderMode === "structured" && structure && onMutateStructure ? (
+          <PromptOrderEditor
+            structure={structure}
+            busy={structureBusy}
+            onSave={(promptOrder) => onMutateStructure({ op: "set-prompt-order", promptOrder })}
+          />
+        ) : (
+          <AdaptiveCodeEditor
+            key={path}
+            value={content}
+            onChange={onChange}
+            language={language}
+            readOnly={readOnly}
+            largeFile={largeFile}
+            viewStateKey={viewStateKey}
+            ariaLabel={`${filename} 源码编辑器`}
+          />
+        )}
       </div>
 
       <div className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 text-[10px] text-muted-foreground">

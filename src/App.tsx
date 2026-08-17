@@ -30,6 +30,9 @@ import { WorkspaceInspector } from "./components/workspace/workspace-inspector";
 import { WorkspaceInspectorDrawer } from "./components/workspace/workspace-inspector-drawer";
 import { ResizableSidebar } from "./components/workspace/resizable-sidebar";
 import { WorkspaceTopBar } from "./components/workspace/workspace-top-bar";
+import { ProjectSettingsDialog } from "./components/workspace/project-settings-dialog";
+import { SnapshotHistoryDialog } from "./components/workspace/snapshot-history-dialog";
+import { TextInputDialog } from "./components/workspace/text-input-dialog";
 import {
   DeleteProjectDialog,
   ExplicitDraftDialog,
@@ -39,7 +42,7 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { useProjectWorkspace } from "./hooks/use-project-workspace";
 import { useStConnection } from "./hooks/use-st-connection";
 import { runSafely } from "./lib/async";
-import type { ProjectExportResult } from "./lib/project-api";
+import type { ProjectExportResult, StructureMutation } from "./lib/project-api";
 
 export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
@@ -58,6 +61,9 @@ export default function App() {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [connectionDialogOpen, setConnectionDialogOpen] = useState(false);
   const [pushDialogOpen, setPushDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [snapshotDialogOpen, setSnapshotDialogOpen] = useState(false);
+  const [snapshotCreateDialogOpen, setSnapshotCreateDialogOpen] = useState(false);
   const [explorerVisible, setExplorerVisible] = useState(true);
   const [inspectorVisible, setInspectorVisible] = useState(true);
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
@@ -223,6 +229,39 @@ export default function App() {
       await workspace.flushSave();
     }, "完整 JSON 已应用并重新拆分");
 
+  const handleStructureMutation = useCallback((mutation: StructureMutation) => {
+    requestWorkspaceAction(() => runOperation(
+      () => workspace.mutateStructure(mutation),
+      mutation.op === "delete" ? "条目已删除，并已创建恢复快照" : "工程结构已更新",
+    ));
+  }, [requestWorkspaceAction, runOperation, workspace]);
+
+  const handleValidate = () => runOperation(async () => {
+    const result = await workspace.validateProject();
+    const errors = result.diagnostics.filter((item) => item.severity === "error").length;
+    const warnings = result.diagnostics.filter((item) => item.severity === "warning").length;
+    if (errors) toast.error(`验证发现 ${errors} 个错误`, { description: "请在诊断页签中定位并修复。" });
+    else toast.success("工程验证通过", { description: warnings ? `${warnings} 个警告允许继续导出` : "未发现构建问题" });
+  });
+
+  const handleCreateSnapshot = (label: string) => {
+    setSnapshotCreateDialogOpen(false);
+    requestWorkspaceAction(() => runOperation(async () => {
+      await workspace.createSnapshot(label);
+    }, "快照已创建"));
+  };
+
+  const handleRestoreSnapshot = (snapshotId: string) => {
+    requestWorkspaceAction(() => runOperation(async () => {
+      await workspace.restoreSnapshot(snapshotId);
+      setSnapshotDialogOpen(false);
+    }, "快照已恢复；恢复前状态已自动保存"), "恢复快照");
+  };
+
+  const handleDeleteSnapshot = (snapshotId: string) => {
+    void runOperation(() => workspace.deleteSnapshot(snapshotId), "快照已永久删除");
+  };
+
   const handleCloseProject = () =>
     runOperation(async () => {
       await workspace.closeProject();
@@ -263,6 +302,7 @@ export default function App() {
   const activeSize =
     workspace.activeFile?.size ?? new TextEncoder().encode(activeContent).length;
   const activeLineCount = useDebouncedLineCount(activeContent);
+  const diagnosticsBlocking = workspace.diagnostics.some((item) => item.severity === "error");
   const explorerFiles = useMemo<ExplorerFile[]>(
     () =>
       workspace.files.map((file) => ({
@@ -317,12 +357,17 @@ export default function App() {
           backendOnline={backendOnline}
           stConnection={st.session}
           pushAvailable={Boolean(backendOnline && workspace.project && st.session?.status === "connected")}
+          diagnosticsBlocking={diagnosticsBlocking}
           onToggleExplorer={() => setExplorerVisible((value) => !value)}
           onOpenProjects={openProjectManager}
           onCloseProject={() => requestWorkspaceAction(handleCloseProject, "关闭")}
           onOpenConnection={() => setConnectionDialogOpen(true)}
           onExport={() => requestWorkspaceAction(handleExport)}
           onDownloadProject={() => requestWorkspaceAction(handleDownloadProject)}
+          onValidate={() => requestWorkspaceAction(handleValidate)}
+          onCreateSnapshot={() => setSnapshotCreateDialogOpen(true)}
+          onOpenSnapshots={() => setSnapshotDialogOpen(true)}
+          onOpenSettings={() => setSettingsDialogOpen(true)}
           onPush={() => {
             if (st.session?.status !== "connected") {
               setConnectionDialogOpen(true);
@@ -367,6 +412,10 @@ export default function App() {
                     activePath={activePath}
                     onSelect={handleDesktopFileSelect}
                     onOpenProjects={openProjectManager}
+                    structure={workspace.structure}
+                    structureBusy={workspace.structureMutation === "saving" || operationBusy}
+                    onMutate={handleStructureMutation}
+                    onOpenSettings={() => setSettingsDialogOpen(true)}
                   />
                 </ResizableSidebar>
               )}
@@ -384,6 +433,9 @@ export default function App() {
                 onChange={workspace.setContent}
                 onFlush={workspace.handleEditorBlur}
                 onApply={() => void handleApplySourceJson()}
+                structure={workspace.structure}
+                structureBusy={workspace.structureMutation === "saving"}
+                onMutateStructure={handleStructureMutation}
               />
 
               {inspectorVisible && (
@@ -406,6 +458,14 @@ export default function App() {
                     saveState={mappedSaveState}
                     saveMode={workspace.saveMode}
                     backendOnline={backendOnline}
+                    structure={workspace.structure}
+                    structureBusy={workspace.structureMutation === "saving"}
+                    diagnostics={workspace.diagnostics}
+                    diagnosticsStale={workspace.diagnosticsStale}
+                    validationBusy={operationBusy}
+                    onMutateStructure={handleStructureMutation}
+                    onValidate={() => requestWorkspaceAction(handleValidate)}
+                    onOpenPath={handleDesktopFileSelect}
                   />
                 </ResizableSidebar>
               )}
@@ -454,6 +514,14 @@ export default function App() {
                     saveState={mappedSaveState}
                     saveMode={workspace.saveMode}
                     backendOnline={backendOnline}
+                    structure={workspace.structure}
+                    structureBusy={workspace.structureMutation === "saving"}
+                    diagnostics={workspace.diagnostics}
+                    diagnosticsStale={workspace.diagnosticsStale}
+                    validationBusy={operationBusy}
+                    onMutateStructure={handleStructureMutation}
+                    onValidate={() => requestWorkspaceAction(handleValidate)}
+                    onOpenPath={handleDesktopFileSelect}
                   />
                 </>
               )}
@@ -469,6 +537,10 @@ export default function App() {
                     activePath={activePath}
                     onSelect={handleMobileFileSelect}
                     onOpenProjects={openProjectManager}
+                    structure={workspace.structure}
+                    structureBusy={workspace.structureMutation === "saving" || operationBusy}
+                    onMutate={handleStructureMutation}
+                    onOpenSettings={() => setSettingsDialogOpen(true)}
                   />
                 </div>
               )}
@@ -486,6 +558,9 @@ export default function App() {
                   onChange={workspace.setContent}
                   onFlush={workspace.handleEditorBlur}
                   onApply={() => void handleApplySourceJson()}
+                  structure={workspace.structure}
+                  structureBusy={workspace.structureMutation === "saving"}
+                  onMutateStructure={handleStructureMutation}
                 />
               )}
               {mobileView === "preview" && (
@@ -500,6 +575,14 @@ export default function App() {
                   saveMode={workspace.saveMode}
                   backendOnline={backendOnline}
                   initialTab="preview"
+                  structure={workspace.structure}
+                  structureBusy={workspace.structureMutation === "saving"}
+                  diagnostics={workspace.diagnostics}
+                  diagnosticsStale={workspace.diagnosticsStale}
+                  validationBusy={operationBusy}
+                  onMutateStructure={handleStructureMutation}
+                  onValidate={() => requestWorkspaceAction(handleValidate)}
+                  onOpenPath={handleMobileFileSelect}
                 />
               )}
               {mobileView === "runtime" && <RuntimeUnavailable stOrigin={st.session?.origin} />}
@@ -618,6 +701,40 @@ export default function App() {
             }}
           />
         ) : null}
+
+        <ProjectSettingsDialog
+          open={settingsDialogOpen}
+          onOpenChange={setSettingsDialogOpen}
+          project={workspace.project}
+          busy={operationBusy}
+          onSave={(input) => {
+            void runOperation(async () => {
+              await workspace.updateProjectSettings(input);
+              setSettingsDialogOpen(false);
+            }, "工程设置已保存");
+          }}
+        />
+
+        <SnapshotHistoryDialog
+          open={snapshotDialogOpen}
+          onOpenChange={setSnapshotDialogOpen}
+          snapshots={workspace.snapshots}
+          busy={operationBusy}
+          onRestore={handleRestoreSnapshot}
+          onDelete={handleDeleteSnapshot}
+        />
+
+        <TextInputDialog
+          open={snapshotCreateDialogOpen}
+          onOpenChange={setSnapshotCreateDialogOpen}
+          title="创建工程快照"
+          description="保存当前完整 preset 构建结果，之后可从快照历史恢复。"
+          inputLabel="快照名称"
+          initialValue="手动快照"
+          confirmLabel="创建快照"
+          busy={operationBusy}
+          onSubmit={handleCreateSnapshot}
+        />
 
         <ExplicitDraftDialog
           open={draftDialogOpen}

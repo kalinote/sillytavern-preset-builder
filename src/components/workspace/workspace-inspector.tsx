@@ -5,6 +5,8 @@ import {
   FileText,
   Globe2,
   Info,
+  ListChecks,
+  Bug,
   Maximize2,
   Monitor,
   RefreshCw,
@@ -16,11 +18,14 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
+import type { ProjectDiagnostic, ProjectStructure, StructureMutation } from "../../lib/project-api";
 import type { SaveState } from "./workspace-editor-pane";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { ItemPropertiesPanel } from "./item-properties-panel";
+import { WorkspaceDiagnostics } from "./workspace-diagnostics";
 
 interface WorkspaceInspectorProps {
   path: string;
@@ -32,7 +37,15 @@ interface WorkspaceInspectorProps {
   saveMode: "auto" | "explicit";
   backendOnline: boolean;
   className?: string;
-  initialTab?: "file" | "preview";
+  initialTab?: "file" | "item" | "diagnostics" | "preview";
+  structure?: ProjectStructure | null;
+  structureBusy?: boolean;
+  diagnostics?: ProjectDiagnostic[];
+  diagnosticsStale?: boolean;
+  validationBusy?: boolean;
+  onMutateStructure?: (mutation: StructureMutation) => void;
+  onValidate?: () => void;
+  onOpenPath?: (path: string) => void;
 }
 
 export function WorkspaceInspector({
@@ -46,7 +59,16 @@ export function WorkspaceInspector({
   backendOnline,
   className,
   initialTab = "file",
+  structure,
+  structureBusy,
+  diagnostics = [],
+  diagnosticsStale,
+  validationBusy,
+  onMutateStructure,
+  onValidate,
+  onOpenPath,
 }: WorkspaceInspectorProps) {
+  const hasItem = Boolean(structure && /^(prompts|regex|scripts)\/[^/]+\//.test(path));
   return (
     <aside
       className={cn(
@@ -56,10 +78,18 @@ export function WorkspaceInspector({
     >
       <Tabs defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-12 shrink-0 items-center border-b border-border px-3">
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="file">
               <FileText className="size-3.5" />
               文件
+            </TabsTrigger>
+            <TabsTrigger value="item" disabled={!hasItem}>
+              <ListChecks className="size-3.5" />
+              条目
+            </TabsTrigger>
+            <TabsTrigger value="diagnostics">
+              <Bug className="size-3.5" />
+              诊断
             </TabsTrigger>
             <TabsTrigger value="preview">
               <Eye className="size-3.5" />
@@ -121,6 +151,22 @@ export function WorkspaceInspector({
               </div>
             </InspectorSection>
           </div>
+        </TabsContent>
+
+        <TabsContent value="item" className="min-h-0 flex-1 overflow-y-auto">
+          {structure && onMutateStructure ? (
+            <ItemPropertiesPanel path={path} structure={structure} busy={structureBusy} onApply={onMutateStructure} />
+          ) : null}
+        </TabsContent>
+
+        <TabsContent value="diagnostics" className="min-h-0 flex-1 overflow-y-auto">
+          <WorkspaceDiagnostics
+            diagnostics={diagnostics}
+            stale={diagnosticsStale}
+            busy={validationBusy}
+            onValidate={onValidate}
+            onOpenPath={onOpenPath}
+          />
         </TabsContent>
 
         <TabsContent value="preview" className="min-h-0 flex-1 overflow-y-auto p-3">

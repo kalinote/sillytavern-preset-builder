@@ -13,7 +13,7 @@ import {
   type StSessionManagerOptions,
 } from "./st-session-manager.js";
 import { parseStAllowedOrigins, parseStTargetPolicy } from "./st-http-client.js";
-import type { ImportProjectInput, JsonObject } from "./types.js";
+import type { ImportProjectInput, JsonObject, StructureMutation } from "./types.js";
 
 const DEFAULT_BODY_LIMIT = 64 * 1024 * 1024;
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
@@ -35,7 +35,7 @@ interface MultipartPart {
   data: Buffer;
 }
 
-const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] as const;
+const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 const CORS_HEADERS = ["content-type", "if-match", "x-project-name", "x-project-version"] as const;
 
 function addVary(response: ServerResponse, value: string): void {
@@ -637,6 +637,20 @@ export function createApiServer(options: ApiServerOptions = {}): {
         sendJson(response, 200, { project: await store.getProject(projectMatch[1] as string) });
         return;
       }
+      if (projectMatch && request.method === "PATCH") {
+        const body = parseJsonBuffer(await readRequestBody(request, 32 * 1024));
+        if (!isJsonObject(body) || typeof body.ifProjectRevision !== "string") {
+          throw new ApiError(400, "INVALID_INPUT", "Request body must contain ifProjectRevision");
+        }
+        const project = await store.updateProject(projectMatch[1] as string, {
+          ifProjectRevision: body.ifProjectRevision,
+          ...(typeof body.name === "string" ? { name: body.name } : {}),
+          ...(typeof body.version === "string" ? { version: body.version } : {}),
+          ...(typeof body.targetPresetName === "string" ? { targetPresetName: body.targetPresetName } : {}),
+        });
+        sendJson(response, 200, { project });
+        return;
+      }
       if (projectMatch && request.method === "DELETE") {
         const projectId = projectMatch[1] as string;
         await store.deleteProject(projectId);
@@ -665,6 +679,82 @@ export function createApiServer(options: ApiServerOptions = {}): {
         });
         response.setHeader("ETag", `"${file.revision}"`);
         sendJson(response, 200, file);
+        return;
+      }
+
+      const structureMatch = /^\/api\/projects\/([^/]+)\/structure$/.exec(pathname);
+      if (structureMatch && request.method === "GET") {
+        sendJson(response, 200, {
+          structure: await store.getProjectStructure(structureMatch[1] as string),
+          diagnostics: [],
+        });
+        return;
+      }
+      const mutationMatch = /^\/api\/projects\/([^/]+)\/structure\/mutations$/.exec(pathname);
+      if (mutationMatch && request.method === "POST") {
+        const body = parseJsonBuffer(await readRequestBody(request, bodyLimit));
+        if (!isJsonObject(body) || typeof body.ifRevision !== "string" || !isJsonObject(body.mutation)) {
+          throw new ApiError(400, "INVALID_INPUT", "Request body must contain ifRevision and mutation");
+        }
+        const mutation = body.mutation;
+        const validOps = new Set(["create", "duplicate", "patch", "delete", "reorder", "set-prompt-order"]);
+        if (typeof mutation.op !== "string" || !validOps.has(mutation.op)) {
+          throw new ApiError(422, "INVALID_STRUCTURE_MUTATION", "Unknown structure mutation operation");
+        }
+        if (mutation.op !== "set-prompt-order" && !["prompt", "regex", "script"].includes(String(mutation.kind))) {
+          throw new ApiError(422, "INVALID_STRUCTURE_MUTATION", "Unknown project item kind");
+        }
+        const result = await store.mutateProjectStructure(mutationMatch[1] as string, {
+          ifRevision: body.ifRevision,
+          mutation: mutation as unknown as StructureMutation,
+        });
+        sendJson(response, 200, {
+          ...result,
+          build: {
+            revision: result.build.revision,
+            size: result.build.size,
+            diagnostics: result.build.diagnostics,
+          },
+        });
+        return;
+      }
+
+      const snapshotsMatch = /^\/api\/projects\/([^/]+)\/snapshots$/.exec(pathname);
+      if (snapshotsMatch && request.method === "GET") {
+        sendJson(response, 200, { snapshots: await store.listSnapshots(snapshotsMatch[1] as string) });
+        return;
+      }
+      if (snapshotsMatch && request.method === "POST") {
+        const body = parseJsonBuffer(await readRequestBody(request, 32 * 1024));
+        if (!isJsonObject(body) || typeof body.ifRevision !== "string") {
+          throw new ApiError(400, "INVALID_INPUT", "Request body must contain ifRevision");
+        }
+        const snapshot = await store.createSnapshot(snapshotsMatch[1] as string, {
+          ifRevision: body.ifRevision,
+          ...(typeof body.label === "string" ? { label: body.label } : {}),
+        });
+        sendJson(response, 201, { snapshot });
+        return;
+      }
+      const snapshotRestoreMatch = /^\/api\/projects\/([^/]+)\/snapshots\/([^/]+)\/restore$/.exec(pathname);
+      if (snapshotRestoreMatch && request.method === "POST") {
+        const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
+        if (!isJsonObject(body) || typeof body.ifRevision !== "string") {
+          throw new ApiError(400, "INVALID_INPUT", "Request body must contain ifRevision");
+        }
+        sendJson(response, 200, await store.restoreSnapshot(
+          snapshotRestoreMatch[1] as string,
+          snapshotRestoreMatch[2] as string,
+          { ifRevision: body.ifRevision },
+        ));
+        return;
+      }
+      const snapshotMatch = /^\/api\/projects\/([^/]+)\/snapshots\/([^/]+)$/.exec(pathname);
+      if (snapshotMatch && request.method === "DELETE") {
+        await store.deleteSnapshot(snapshotMatch[1] as string, snapshotMatch[2] as string);
+        response.statusCode = 204;
+        response.setHeader("Cache-Control", "no-store");
+        response.end();
         return;
       }
 
@@ -708,7 +798,39 @@ export function createApiServer(options: ApiServerOptions = {}): {
 
       const buildMatch = /^\/api\/projects\/([^/]+)\/build$/.exec(pathname);
       if (buildMatch && request.method === "POST") {
-        const built = await store.buildProject(buildMatch[1] as string);
+        const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
+        const validateOnly = isJsonObject(body) && body.validateOnly === true;
+        let built;
+        try {
+          built = await store.buildProject(buildMatch[1] as string);
+        } catch (error) {
+          const apiError = asApiError(error);
+          if (!validateOnly || apiError.status !== 422) throw error;
+          const path = isJsonObject(apiError.details) && typeof apiError.details.path === "string"
+            ? apiError.details.path
+            : undefined;
+          sendJson(response, 200, {
+            success: false,
+            revision: "",
+            size: 0,
+            diagnostics: [{
+              level: "error",
+              code: apiError.code,
+              message: apiError.message,
+              ...(path === undefined ? {} : { path }),
+            }],
+          });
+          return;
+        }
+        if (validateOnly) {
+          sendJson(response, 200, {
+            success: !built.diagnostics.some((diagnostic) => diagnostic.level === "error"),
+            revision: built.revision,
+            size: built.size,
+            diagnostics: built.diagnostics,
+          });
+          return;
+        }
         sendJson(response, 200, {
           success: true,
           preset: built.preset,

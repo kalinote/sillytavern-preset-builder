@@ -19,7 +19,7 @@ export interface RegexMirrorBinding {
 }
 
 export interface ProjectManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   name: string;
   version: string;
@@ -109,6 +109,86 @@ export interface ScriptIndexItem {
 export interface OrderedIndex<T> {
   schemaVersion: 1;
   items: T[];
+}
+
+export type ProjectItemKind = "prompt" | "regex" | "script";
+
+export interface PromptStructureItem {
+  kind: "prompt";
+  uid: string;
+  order: number;
+  name?: string;
+  identifier?: string;
+  role?: string;
+  enabled?: boolean;
+  marker?: JsonValue;
+}
+
+export interface RegexStructureItem {
+  kind: "regex";
+  uid: string;
+  order: number;
+  name?: string;
+  id?: string;
+  disabled?: boolean;
+  runOnEdit?: boolean;
+  placement?: JsonValue;
+  minDepth?: number;
+  maxDepth?: number;
+}
+
+export interface ScriptStructureItem {
+  kind: "script";
+  uid: string;
+  order: number;
+  name?: string;
+  id?: string;
+  enabled?: boolean;
+}
+
+export interface ProjectStructure {
+  projectId: string;
+  projectRevision: string;
+  revision: string;
+  prompts: PromptStructureItem[];
+  regex: RegexStructureItem[];
+  scripts: ScriptStructureItem[];
+  promptOrder: JsonValue[];
+}
+
+export type StructureMutation =
+  | { op: "create"; kind: ProjectItemKind; afterUid?: string; template?: "blank" }
+  | { op: "duplicate"; kind: ProjectItemKind; uid: string }
+  | { op: "patch"; kind: ProjectItemKind; uid: string; patch: JsonObject }
+  | {
+      op: "delete";
+      kind: ProjectItemKind;
+      uid: string;
+      removePromptOrderReferences?: boolean;
+    }
+  | { op: "reorder"; kind: ProjectItemKind; uids: string[] }
+  | { op: "set-prompt-order"; promptOrder: JsonValue[] };
+
+export type SnapshotKind = "manual" | "automatic";
+export type SnapshotReason =
+  | "manual"
+  | "before-item-delete"
+  | "before-source-json-apply"
+  | "before-snapshot-restore";
+
+export interface ProjectSnapshotSummary {
+  uid: string;
+  label: string;
+  kind: SnapshotKind;
+  reason: SnapshotReason;
+  createdAt: string;
+  presetRevision: string;
+  size: number;
+}
+
+export interface SnapshotIndex {
+  schemaVersion: 1;
+  items: ProjectSnapshotSummary[];
 }
 
 export interface ImportProjectInput {

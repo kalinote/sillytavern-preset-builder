@@ -334,3 +334,134 @@ test("project deletion is serialized with writes and never affects other project
     );
   });
 });
+
+test("schema v2 structure mutations preserve unknown fields and enforce prompt references", async () => {
+  await withStore(async (store, root) => {
+    const manifest = await store.importProject({ name: "Structure", preset: fixturePreset() });
+    assert.equal(manifest.schemaVersion, 2);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(root, manifest.id, "snapshots", "index.json"), "utf8")),
+      { schemaVersion: 1, items: [] },
+    );
+
+    let structure = await store.getProjectStructure(manifest.id);
+    assert.equal(structure.prompts.length, 3);
+    assert.equal(structure.regex.length, 1);
+    assert.equal(structure.scripts.length, 1);
+
+    const duplicated = await store.mutateProjectStructure(manifest.id, {
+      ifRevision: structure.revision,
+      mutation: { op: "duplicate", kind: "prompt", uid: structure.prompts[0]!.uid },
+    });
+    assert(duplicated.createdUid);
+    const duplicate = duplicated.structure.prompts.find((item) => item.uid === duplicated.createdUid);
+    assert.equal(duplicate?.name, "Main prompt 副本");
+    assert.equal(duplicate?.identifier, "main-2");
+    const duplicateMeta = JSON.parse(
+      await readFile(join(root, manifest.id, "prompts", duplicated.createdUid, "meta.json"), "utf8"),
+    ) as JsonObject;
+    assert.deepEqual(duplicateMeta.unknown_prompt_field, { preserve: 0 });
+
+    const patched = await store.mutateProjectStructure(manifest.id, {
+      ifRevision: duplicated.structure.revision,
+      mutation: {
+        op: "patch",
+        kind: "prompt",
+        uid: structure.prompts[0]!.uid,
+        patch: { name: "Renamed", identifier: "renamed-main", enabled: true },
+      },
+    });
+    const promptOrder = patched.structure.promptOrder as JsonObject[];
+    assert.equal(((promptOrder[0]!.order as JsonObject[])[0]!.identifier), "renamed-main");
+    const patchedMeta = JSON.parse(
+      await readFile(join(root, manifest.id, "prompts", structure.prompts[0]!.uid, "meta.json"), "utf8"),
+    ) as JsonObject;
+    assert.deepEqual(patchedMeta.unknown_prompt_field, { preserve: 0 });
+
+    await assert.rejects(
+      store.mutateProjectStructure(manifest.id, {
+        ifRevision: patched.structure.revision,
+        mutation: { op: "delete", kind: "prompt", uid: structure.prompts[0]!.uid },
+      }),
+      (error: unknown) => error instanceof ApiError && error.code === "PROMPT_ORDER_REFERENCE_EXISTS",
+    );
+    const removed = await store.mutateProjectStructure(manifest.id, {
+      ifRevision: patched.structure.revision,
+      mutation: {
+        op: "delete",
+        kind: "prompt",
+        uid: structure.prompts[0]!.uid,
+        removePromptOrderReferences: true,
+      },
+    });
+    assert.equal(removed.snapshot?.reason, "before-item-delete");
+    assert.equal(removed.structure.prompts.some((item) => item.uid === structure.prompts[0]!.uid), false);
+
+    const createdRegex = await store.mutateProjectStructure(manifest.id, {
+      ifRevision: removed.structure.revision,
+      mutation: { op: "create", kind: "regex" },
+    });
+    assert.equal(createdRegex.structure.regex.length, 2);
+    const createdScript = await store.mutateProjectStructure(manifest.id, {
+      ifRevision: createdRegex.structure.revision,
+      mutation: { op: "create", kind: "script" },
+    });
+    assert.equal(createdScript.structure.scripts.length, 2);
+    await assert.rejects(
+      store.mutateProjectStructure(manifest.id, {
+        ifRevision: createdScript.structure.revision,
+        mutation: { op: "reorder", kind: "script", uids: [] },
+      }),
+      (error: unknown) => error instanceof ApiError && error.code === "INVALID_STRUCTURE_MUTATION",
+    );
+  });
+});
+
+test("snapshots restore complete presets and project settings use optimistic concurrency", async () => {
+  await withStore(async (store) => {
+    const manifest = await store.importProject({ name: "History", preset: fixturePreset() });
+    const initial = await store.getProjectStructure(manifest.id);
+    const manual = await store.createSnapshot(manifest.id, {
+      label: "Initial state",
+      ifRevision: initial.revision,
+    });
+    assert.equal(manual.kind, "manual");
+
+    const mainPrompt = initial.prompts.find((item) => item.identifier === "main");
+    assert(mainPrompt);
+    const contentPath = `prompts/${mainPrompt.uid}/content.md`;
+    const content = await store.readProjectFile(manifest.id, contentPath);
+    await store.saveProjectFile(manifest.id, contentPath, {
+      content: "Changed after snapshot",
+      ifRevision: content.revision,
+    });
+    const changed = await store.buildProject(manifest.id);
+    assert.notEqual(changed.revision, initial.revision);
+
+    const restored = await store.restoreSnapshot(manifest.id, manual.uid, { ifRevision: changed.revision });
+    assert.deepEqual(restored.build.preset, fixturePreset());
+    const snapshots = await store.listSnapshots(manifest.id);
+    assert.equal(snapshots.some((item) => item.uid === manual.uid), true);
+    assert.equal(snapshots.some((item) => item.reason === "before-snapshot-restore"), true);
+    await store.deleteSnapshot(manifest.id, manual.uid);
+    assert.equal((await store.listSnapshots(manifest.id)).some((item) => item.uid === manual.uid), false);
+
+    const beforeSettings = await store.getProject(manifest.id);
+    const updated = await store.updateProject(manifest.id, {
+      ifProjectRevision: beforeSettings.updatedAt,
+      name: "History renamed",
+      version: "v2",
+      targetPresetName: "Remote target",
+    });
+    assert.equal(updated.name, "History renamed");
+    assert.equal(updated.version, "v2");
+    assert.equal(updated.targetPresetName, "Remote target");
+    await assert.rejects(
+      store.updateProject(manifest.id, {
+        ifProjectRevision: beforeSettings.updatedAt,
+        name: "Stale",
+      }),
+      (error: unknown) => error instanceof ApiError && error.code === "PROJECT_REVISION_CONFLICT",
+    );
+  });
+});

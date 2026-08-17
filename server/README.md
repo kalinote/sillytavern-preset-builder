@@ -176,11 +176,19 @@ Preset 目录响应为：
 | POST | `/api/projects/import/json` | 从 preset 创建工程 |
 | POST | `/api/projects/import/archive` | 上传 Preset Studio ZIP 工程包 |
 | GET | `/api/projects/:id` | 读取 manifest |
+| PATCH | `/api/projects/:id` | 使用 `ifProjectRevision` 更新名称、版本和默认 ST 目标 |
+| DELETE | `/api/projects/:id` | 永久删除服务器工程 |
 | GET | `/api/projects/:id/archive` | 下载完整 ZIP 工程包 |
 | GET | `/api/projects/:id/files` | 读取扁平文件树 |
 | GET | `/api/projects/:id/files/*` | 读取 UTF-8 文件内容和 revision |
 | PUT | `/api/projects/:id/files/*` | 原子保存 `{content,ifRevision?}` |
-| POST | `/api/projects/:id/build` | 在内存中构建 JSON，不写 output |
+| GET/PUT | `/api/projects/:id/source-json` | 读取或显式应用完整 `preset.json` |
+| GET | `/api/projects/:id/structure` | 一次读取三类条目摘要和 Prompt Order |
+| POST | `/api/projects/:id/structure/mutations` | 带 `ifRevision` 的原子结构变更 |
+| GET/POST | `/api/projects/:id/snapshots` | 列出或创建手动快照 |
+| POST | `/api/projects/:id/snapshots/:snapshotId/restore` | 恢复快照并先自动备份当前状态 |
+| DELETE | `/api/projects/:id/snapshots/:snapshotId` | 永久删除单个快照 |
+| POST | `/api/projects/:id/build` | 构建 JSON；`validateOnly` 时只返回摘要和诊断 |
 | POST | `/api/projects/:id/export` | 构建并写入 output，返回下载地址 |
 | GET | `/api/projects/:id/outputs` | 导出文件列表 |
 | GET | `/api/projects/:id/outputs/:filename` | 下载导出 JSON |
@@ -219,7 +227,7 @@ ST 直连的主要错误类别：
 - 拒绝大小写或 Unicode 归一化后碰撞的重复路径。
 - 拒绝文件/目录父子冲突；只创建普通文件，不恢复符号链接。
 - 限制压缩大小、解压总大小、单文件大小和条目数。
-- 要求根 `project.json` 为 schema 1，并验证所有受管拆分文件能够重新构建 preset。
+- 要求根 `project.json` 为 schema 2，并验证所有受管拆分文件能够重新构建 preset。
 
 下载接口返回 `application/zip` 和 RFC 5987 `Content-Disposition` 文件名。工程包包含 manifest、拆分源码、snapshot、recovery、output 和其他普通工程文件，不包含符号链接或原子写入临时文件。
 
@@ -233,6 +241,9 @@ ST 直连的主要错误类别：
 - `preset.base.json` 保留未由专用编辑器管理的所有已知/未知字段。
 - 示例中的三个一致 Regex 镜像被识别为一个逻辑集合，构建时写回三个目标。
 - 冲突的 Regex 镜像不会静默合并，而会完整保留在 `preset.base.json`。
+- `snapshots/index.json` 记录手动和自动快照；自动快照最多保留最近 20 个，手动快照不自动清理。
+
+结构 mutation 只接受一次单操作，并在工程锁内复制受管源码到 `.staging`、执行变更、完整构建验证、按需创建快照，最后通过带回滚的目录交换提交。名称不参与物理路径拼接；属性表单只 patch 白名单字段，未知 `meta.json` 字段保持不变。
 
 写文件使用同目录临时文件、`fsync` 和 `rename`；manifest 最后提交。文件 API 拒绝绝对路径、父目录跳转、NUL 和符号链接逃逸。`ifRevision` 使用 SHA-256 做乐观并发控制。
 

@@ -148,9 +148,79 @@ function installRegexMirrors(
   }
 }
 
+function collectPromptOrderDiagnostics(preset: JsonObject, diagnostics: Diagnostic[]): void {
+  const prompts = Array.isArray(preset.prompts) ? preset.prompts : [];
+  const identifiers = new Map<string, number>();
+  for (const prompt of prompts) {
+    if (!isJsonObject(prompt) || typeof prompt.identifier !== "string" || !prompt.identifier) continue;
+    identifiers.set(prompt.identifier, (identifiers.get(prompt.identifier) ?? 0) + 1);
+  }
+  for (const [identifier, count] of identifiers) {
+    if (count > 1) {
+      diagnostics.push({
+        level: "error",
+        code: "DUPLICATE_PROMPT_IDENTIFIER",
+        message: `Prompt identifier ${identifier} is used by ${count} prompts`,
+        path: "prompts/index.json",
+      });
+    }
+  }
+
+  if (!Array.isArray(preset.prompt_order)) {
+    diagnostics.push({
+      level: "error",
+      code: "INVALID_PROMPT_ORDER",
+      message: "prompt_order must be an array",
+      path: "prompts/prompt-order.json",
+    });
+    return;
+  }
+  for (let groupIndex = 0; groupIndex < preset.prompt_order.length; groupIndex += 1) {
+    const group = preset.prompt_order[groupIndex];
+    if (!isJsonObject(group) || !Array.isArray(group.order)) {
+      diagnostics.push({
+        level: "error",
+        code: "INVALID_PROMPT_ORDER_GROUP",
+        message: `prompt_order group ${groupIndex + 1} has no order array`,
+        path: "prompts/prompt-order.json",
+      });
+      continue;
+    }
+    const seen = new Set<string>();
+    for (const entry of group.order) {
+      if (!isJsonObject(entry) || typeof entry.identifier !== "string") {
+        diagnostics.push({
+          level: "error",
+          code: "INVALID_PROMPT_ORDER_ENTRY",
+          message: `prompt_order group ${groupIndex + 1} contains an invalid entry`,
+          path: "prompts/prompt-order.json",
+        });
+        continue;
+      }
+      if (!identifiers.has(entry.identifier)) {
+        diagnostics.push({
+          level: "error",
+          code: "DANGLING_PROMPT_ORDER_REFERENCE",
+          message: `prompt_order references missing prompt ${entry.identifier}`,
+          path: "prompts/prompt-order.json",
+        });
+      }
+      if (seen.has(entry.identifier)) {
+        diagnostics.push({
+          level: "error",
+          code: "DUPLICATE_PROMPT_ORDER_REFERENCE",
+          message: `prompt_order group ${groupIndex + 1} references ${entry.identifier} more than once`,
+          path: "prompts/prompt-order.json",
+        });
+      }
+      seen.add(entry.identifier);
+    }
+  }
+}
+
 export async function buildPresetProject(projectRoot: string): Promise<BuildResult> {
   const manifest = await readJson<ProjectManifest>(join(projectRoot, "project.json"), "project.json");
-  if (manifest.schemaVersion !== 1) {
+  if (manifest.schemaVersion !== 2) {
     throw new ApiError(422, "UNSUPPORTED_PROJECT", "Unsupported project schema version");
   }
   const base = await readJson<JsonObject>(join(projectRoot, "preset.base.json"), "preset.base.json");
@@ -188,6 +258,8 @@ export async function buildPresetProject(projectRoot: string): Promise<BuildResu
     }
     helper.scripts = await buildScripts(projectRoot);
   }
+
+  collectPromptOrderDiagnostics(preset, diagnostics);
 
   const serialized = `${JSON.stringify(preset, null, 2)}\n`;
   const reparsed = JSON.parse(serialized) as unknown;

@@ -264,3 +264,95 @@ test("health exposes the workspace path only when explicitly enabled", async () 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("HTTP v0.2 structure, settings, snapshots, and validation APIs form a complete workflow", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-http-v02-"));
+  const { server } = createApiServer({ workspaceRoot: root, staticRoot: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const base = `http://127.0.0.1:${address.port}`;
+    const importedResponse = await fetch(`${base}/api/projects/import/json`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "v0.2 API", preset: minimalPreset() }),
+    });
+    const imported = await importedResponse.json() as { project: { id: string; updatedAt: string; schemaVersion: number } };
+    assert.equal(imported.project.schemaVersion, 2);
+
+    const structureResponse = await fetch(`${base}/api/projects/${imported.project.id}/structure`);
+    assert.equal(structureResponse.status, 200);
+    let structure = (await structureResponse.json() as {
+      structure: { revision: string; prompts: Array<{ uid: string }>; regex: unknown[] };
+    }).structure;
+    const createResponse = await fetch(`${base}/api/projects/${imported.project.id}/structure/mutations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ifRevision: structure.revision, mutation: { op: "create", kind: "regex" } }),
+    });
+    assert.equal(createResponse.status, 200);
+    const created = await createResponse.json() as {
+      createdUid: string;
+      structure: typeof structure;
+      build: { revision: string; diagnostics: unknown[] };
+    };
+    assert.match(created.createdUid, /^[0-9a-f-]{36}$/);
+    assert.equal(created.structure.regex.length, 1);
+    structure = created.structure;
+
+    const snapshotResponse = await fetch(`${base}/api/projects/${imported.project.id}/snapshots`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ifRevision: structure.revision, label: "HTTP snapshot" }),
+    });
+    assert.equal(snapshotResponse.status, 201);
+    const snapshot = (await snapshotResponse.json() as { snapshot: { uid: string } }).snapshot;
+    const listResponse = await fetch(`${base}/api/projects/${imported.project.id}/snapshots`);
+    assert.equal((await listResponse.json() as { snapshots: unknown[] }).snapshots.length, 1);
+
+    const projectResponse = await fetch(`${base}/api/projects/${imported.project.id}`);
+    const project = (await projectResponse.json() as { project: { updatedAt: string } }).project;
+    const settingsResponse = await fetch(`${base}/api/projects/${imported.project.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ifProjectRevision: project.updatedAt,
+        name: "Renamed via HTTP",
+        version: "0.2",
+        targetPresetName: "Target v0.2",
+      }),
+    });
+    assert.equal(settingsResponse.status, 200);
+    assert.equal((await settingsResponse.json() as { project: { name: string } }).project.name, "Renamed via HTTP");
+
+    const validationResponse = await fetch(`${base}/api/projects/${imported.project.id}/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ validateOnly: true }),
+    });
+    assert.equal(validationResponse.status, 200);
+    const validation = await validationResponse.json() as { success: boolean; preset?: unknown; revision: string };
+    assert.equal(validation.success, true);
+    assert.equal(Object.hasOwn(validation, "preset"), false);
+    assert(validation.revision.length > 0);
+
+    const restoreResponse = await fetch(
+      `${base}/api/projects/${imported.project.id}/snapshots/${snapshot.uid}/restore`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ifRevision: structure.revision }),
+      },
+    );
+    assert.equal(restoreResponse.status, 200);
+    const deleteSnapshotResponse = await fetch(
+      `${base}/api/projects/${imported.project.id}/snapshots/${snapshot.uid}`,
+      { method: "DELETE" },
+    );
+    assert.equal(deleteSnapshotResponse.status, 204);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
