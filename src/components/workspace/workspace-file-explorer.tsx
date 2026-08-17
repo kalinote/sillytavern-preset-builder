@@ -340,8 +340,8 @@ function TreeNodeRow({
             }
           }}
           className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 text-left text-muted-foreground outline-none hover:bg-muted/70 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30",
-            rootGroup && "text-[10px] font-semibold uppercase tracking-[0.12em]",
+            "flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 text-left text-foreground outline-none hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/30",
+            rootGroup && "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground",
             !rootGroup && "text-xs font-medium",
           )}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
@@ -350,7 +350,7 @@ function TreeNodeRow({
           <ChevronRight className={cn("size-3 shrink-0 transition-transform", isExpanded && "rotate-90")} />
           {isExpanded ? <FolderOpen className="size-3.5 shrink-0 text-primary" /> : <Folder className="size-3.5 shrink-0" />}
           <span className="min-w-0 flex-1 truncate">{rootGroup ? groupLabel(node.entry.path) : node.label}</span>
-          <span className="font-mono text-[9px] font-normal">{node.fileCount}</span>
+          <span className="font-mono text-[9px] font-normal text-muted-foreground">{node.fileCount}</span>
         </button>
         {rootKind && onMutate ? (
           <Button
@@ -429,7 +429,7 @@ function FileRow({
         "group flex w-full items-center gap-2 rounded-lg py-2 pr-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/30",
         active
           ? "bg-primary-soft text-foreground"
-          : "text-muted-foreground hover:bg-muted/80 hover:text-foreground",
+          : "text-foreground hover:bg-muted/80",
       )}
       style={{ paddingLeft: `${10 + depth * 14}px` }}
     >

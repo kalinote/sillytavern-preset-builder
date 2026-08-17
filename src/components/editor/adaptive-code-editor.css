@@ -1,9 +1,11 @@
 .adaptive-code-editor {
   position: relative;
+  flex: 1 1 0%;
+  width: 100%;
   min-height: 160px;
   min-width: 0;
   overflow: hidden;
-  background: #fbfcfe;
+  background: #ffffff;
   color: #2a3548;
   isolation: isolate;
 }

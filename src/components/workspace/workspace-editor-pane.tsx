@@ -9,7 +9,7 @@ import {
   LoaderCircle,
   Save,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { ProjectStructure, StructureMutation } from "../../lib/project-api";
 import { AdaptiveCodeEditor } from "../editor";
@@ -60,6 +60,7 @@ export function WorkspaceEditorPane({
   const readOnly = path.startsWith("output/") || path.startsWith("snapshots/");
   const FileIcon = iconFromLanguage(language);
   const promptOrderFile = path === "prompts/prompt-order.json";
+  const displayPath = useMemo(() => formatEditorPath(path, structure), [path, structure]);
   const [promptOrderMode, setPromptOrderMode] = useState<"source" | "structured">("source");
   useEffect(() => setPromptOrderMode("source"), [path]);
 
@@ -89,8 +90,8 @@ export function WorkspaceEditorPane({
 
       <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate font-mono text-[11px] text-muted-foreground">
-            {path}
+          <p className="truncate font-mono text-[11px] text-muted-foreground" title={displayPath}>
+            {displayPath}
           </p>
         </div>
         <Badge variant="blue">{editorLabel(language)}</Badge>
@@ -184,6 +185,26 @@ export function WorkspaceEditorPane({
       </div>
     </main>
   );
+}
+
+function formatEditorPath(path: string, structure?: ProjectStructure | null) {
+  if (!structure) return path;
+  const match = /^(prompts|regex|scripts)\/([^/]+)\/(.+)$/.exec(path);
+  if (!match) return path;
+
+  const [, group, uid, filename] = match;
+  const item = group === "prompts"
+    ? structure.prompts.find((candidate) => candidate.uid === uid)
+    : group === "regex"
+      ? structure.regex.find((candidate) => candidate.uid === uid)
+      : structure.scripts.find((candidate) => candidate.uid === uid);
+  if (!item) return path;
+
+  const itemName = item.kind === "prompt"
+    ? item.name || item.identifier || uid
+    : item.name || item.id || uid;
+  const groupName = group === "prompts" ? "Prompts" : group === "regex" ? "Regex" : "Scripts";
+  return `${groupName}/${itemName}/${filename}(${path})`;
 }
 
 function SaveIndicator({ state, mode }: { state: SaveState; mode: "auto" | "explicit" }) {

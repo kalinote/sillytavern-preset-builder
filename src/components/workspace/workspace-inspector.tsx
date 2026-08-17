@@ -79,19 +79,19 @@ export function WorkspaceInspector({
       <Tabs defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-12 shrink-0 items-center border-b border-border px-3">
           <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="file">
+            <TabsTrigger value="file" className="whitespace-nowrap px-2">
               <FileText className="size-3.5" />
               文件
             </TabsTrigger>
-            <TabsTrigger value="item" disabled={!hasItem}>
+            <TabsTrigger value="item" disabled={!hasItem} className="whitespace-nowrap px-2">
               <ListChecks className="size-3.5" />
               条目
             </TabsTrigger>
-            <TabsTrigger value="diagnostics">
+            <TabsTrigger value="diagnostics" className="whitespace-nowrap px-2">
               <Bug className="size-3.5" />
               诊断
             </TabsTrigger>
-            <TabsTrigger value="preview">
+            <TabsTrigger value="preview" className="whitespace-nowrap px-2">
               <Eye className="size-3.5" />
               静态预览
             </TabsTrigger>

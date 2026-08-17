@@ -442,9 +442,9 @@ export default function App() {
                 <ResizableSidebar
                   id="desktop-workspace-inspector"
                   side="right"
-                  defaultWidth={360}
-                  minWidth={280}
-                  maxWidth={520}
+                  defaultWidth={440}
+                  minWidth={420}
+                  maxWidth={600}
                   label="调整检查器侧边栏宽度"
                   className="hidden xl:flex"
                   data-testid="desktop-inspector-panel"

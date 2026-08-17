@@ -161,7 +161,7 @@ const mobileTheme = EditorView.theme(
   {
     "&": {
       height: "100%",
-      backgroundColor: "#fbfcfe",
+      backgroundColor: "#ffffff",
       color: "#2a3548",
       fontSize: "13px",
     },
@@ -184,7 +184,7 @@ const mobileTheme = EditorView.theme(
     },
     ".cm-activeLine": { backgroundColor: "#eff5ff" },
     ".cm-gutters": {
-      backgroundColor: "#f3f6fa",
+      backgroundColor: "#ffffff",
       borderRight: "1px solid #e7ecf3",
       color: "#9ca8ba",
     },
