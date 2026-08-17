@@ -12,6 +12,7 @@ import {
   Radio,
   RadioTower,
   Server,
+  XCircle,
 } from "lucide-react";
 
 import type { StSession } from "../../lib/st-api";
@@ -32,11 +33,13 @@ interface WorkspaceTopBarProps {
   projectVersion?: string;
   hasProject: boolean;
   saveState: SaveState;
+  saveMode?: "auto" | "explicit";
   backendOnline: boolean;
   stConnection: StSession | null;
   pushAvailable?: boolean;
   onToggleExplorer: () => void;
   onOpenProjects: () => void;
+  onCloseProject: () => void;
   onExport: () => void;
   onDownloadProject: () => void;
   onOpenConnection: () => void;
@@ -48,11 +51,13 @@ export function WorkspaceTopBar({
   projectVersion,
   hasProject,
   saveState,
+  saveMode = "auto",
   backendOnline,
   stConnection,
   pushAvailable = false,
   onToggleExplorer,
   onOpenProjects,
+  onCloseProject,
   onExport,
   onDownloadProject,
   onOpenConnection,
@@ -99,7 +104,7 @@ export function WorkspaceTopBar({
       </div>
 
       <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-        {hasProject ? <SaveStatus state={saveState} /> : null}
+        {hasProject ? <SaveStatus state={saveState} mode={saveMode} /> : null}
 
         <Badge variant={backendOnline ? "green" : "red"} className="hidden lg:inline-flex">
           <Server className="size-3" />
@@ -145,6 +150,10 @@ export function WorkspaceTopBar({
               <FolderOpen />
               项目管理
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onCloseProject} disabled={!hasProject}>
+              <XCircle />
+              关闭工程
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -171,6 +180,10 @@ export function WorkspaceTopBar({
               <FolderOpen />
               项目管理
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onCloseProject} disabled={!hasProject}>
+              <XCircle />
+              关闭工程
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={onOpenConnection}>
               <Radio />
               {stConnected ? `ST ${stConnection.version ?? "已连接"} 连接详情` : "连接 SillyTavern"}
@@ -194,7 +207,7 @@ export function WorkspaceTopBar({
   );
 }
 
-function SaveStatus({ state }: { state: SaveState }) {
+function SaveStatus({ state, mode }: { state: SaveState; mode: "auto" | "explicit" }) {
   if (state === "saving") {
     return (
       <span className="hidden items-center gap-1.5 text-xs text-primary lg:flex">
@@ -215,7 +228,7 @@ function SaveStatus({ state }: { state: SaveState }) {
     return (
       <span className="hidden items-center gap-1.5 text-xs text-warning lg:flex">
         <span className="size-2 rounded-full bg-warning" />
-        等待自动保存
+        {mode === "explicit" ? "JSON 待应用" : "等待自动保存"}
       </span>
     );
   }

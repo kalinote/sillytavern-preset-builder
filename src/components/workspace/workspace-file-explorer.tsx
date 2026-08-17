@@ -11,7 +11,7 @@ import {
   Search,
   Settings2,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -23,6 +23,9 @@ export interface ExplorerFile {
   type: "file" | "directory";
   size: number;
   updatedAt?: string;
+  displayName?: string;
+  order?: number;
+  role?: "source-json";
 }
 
 interface WorkspaceFileExplorerProps {
@@ -34,7 +37,15 @@ interface WorkspaceFileExplorerProps {
   onOpenProjects: () => void;
 }
 
-const groupOrder = ["prompts", "regex", "scripts", "snapshots", "output", "project"];
+interface ExplorerNode {
+  entry: ExplorerFile;
+  label: string;
+  children: ExplorerNode[];
+  fileCount: number;
+}
+
+const groupOrder = ["prompts", "regex", "scripts", "snapshots", "output", "recovery"];
+const initiallyExpanded = new Set(["prompts", "regex", "scripts"]);
 
 export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
   projectName,
@@ -45,39 +56,41 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
   onOpenProjects,
 }: WorkspaceFileExplorerProps) {
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<Set<string>>(
-    () => new Set(["snapshots", "output"]),
-  );
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initiallyExpanded));
+  const normalizedQuery = query.trim().toLowerCase();
+  const tree = useMemo(() => {
+    const fullTree = buildTree(files);
+    return normalizedQuery ? filterTree(fullTree, normalizedQuery) : fullTree;
+  }, [files, normalizedQuery]);
 
-  const grouped = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    const groups = new Map<string, ExplorerFile[]>();
-
-    for (const file of files) {
-      if (file.type !== "file") continue;
-      if (normalized && !file.path.toLowerCase().includes(normalized)) continue;
-      const root = file.path.includes("/") ? file.path.split("/")[0] : "project";
-      const items = groups.get(root) ?? [];
-      items.push(file);
-      groups.set(root, items);
-    }
-
-    return [...groups.entries()].sort(
-      ([left], [right]) => groupRank(left) - groupRank(right),
-    );
-  }, [files, query]);
-
-  const toggleGroup = (group: string) => {
-    setCollapsed((current) => {
+  useEffect(() => {
+    if (!activePath) return;
+    const segments = activePath.split("/");
+    setExpanded((current) => {
+      let changed = false;
       const next = new Set(current);
-      if (next.has(group)) next.delete(group);
-      else next.add(group);
+      for (let index = 1; index < segments.length; index += 1) {
+        const ancestor = segments.slice(0, index).join("/");
+        if (!next.has(ancestor)) {
+          next.add(ancestor);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [activePath]);
+
+  const toggleDirectory = (path: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
       return next;
     });
   };
 
   return (
-    <aside className="flex h-full w-[292px] shrink-0 flex-col border-r border-border bg-sidebar">
+    <aside className="flex h-full w-full shrink-0 flex-col border-r border-border bg-sidebar md:w-[292px]">
       <div className="border-b border-border p-3">
         <button
           type="button"
@@ -90,7 +103,7 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="truncate text-sm font-medium">{projectName}</span>
-              {projectVersion && <Badge variant="blue">{projectVersion}</Badge>}
+              {projectVersion ? <Badge variant="blue">{projectVersion}</Badge> : null}
             </span>
             <span className="mt-0.5 block text-[10px] text-muted-foreground">
               点击切换或导入工程
@@ -104,54 +117,31 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索工程文件…"
+            placeholder="搜索工程文件或条目…"
             className="h-8 pl-8 text-xs"
           />
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-        {grouped.map(([group, groupFiles]) => {
-          const isCollapsed = collapsed.has(group);
-          return (
-            <section key={group} className="mb-2">
-              <button
-                type="button"
-                onClick={() => toggleGroup(group)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground hover:bg-muted/70"
-              >
-                {isCollapsed ? (
-                  <Folder className="size-3.5" />
-                ) : (
-                  <FolderOpen className="size-3.5 text-primary" />
-                )}
-                {groupLabel(group)}
-                <span className="ml-auto font-mono text-[9px] font-normal">
-                  {groupFiles.length}
-                </span>
-              </button>
+        {tree.map((node) => (
+          <TreeNodeRow
+            key={node.entry.path}
+            node={node}
+            depth={0}
+            activePath={activePath}
+            expanded={expanded}
+            forceExpanded={Boolean(normalizedQuery)}
+            onToggle={toggleDirectory}
+            onSelect={onSelect}
+          />
+        ))}
 
-              {!isCollapsed && (
-                <div className="mt-0.5 space-y-0.5">
-                  {groupFiles.map((file) => (
-                    <FileRow
-                      key={file.path}
-                      file={file}
-                      active={activePath === file.path}
-                      onClick={() => onSelect(file.path)}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-          );
-        })}
-
-        {grouped.length === 0 && (
+        {tree.length === 0 ? (
           <div className="px-4 py-12 text-center text-xs text-muted-foreground">
             没有符合条件的工程文件
           </div>
-        )}
+        ) : null}
       </div>
 
       <div className="border-t border-border px-3 py-2.5">
@@ -167,48 +157,185 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
   );
 });
 
+function TreeNodeRow({
+  node,
+  depth,
+  activePath,
+  expanded,
+  forceExpanded,
+  onToggle,
+  onSelect,
+}: {
+  node: ExplorerNode;
+  depth: number;
+  activePath?: string;
+  expanded: Set<string>;
+  forceExpanded: boolean;
+  onToggle: (path: string) => void;
+  onSelect: (path: string) => void;
+}) {
+  if (node.entry.type === "file") {
+    return (
+      <FileRow
+        file={node.entry}
+        label={node.label}
+        depth={depth}
+        active={activePath === node.entry.path}
+        onClick={() => onSelect(node.entry.path)}
+      />
+    );
+  }
+
+  const isExpanded = forceExpanded || expanded.has(node.entry.path);
+  const rootGroup = depth === 0 && groupOrder.includes(node.entry.path);
+  return (
+    <section className={rootGroup ? "mb-2" : "my-0.5"}>
+      <button
+        type="button"
+        onClick={() => onToggle(node.entry.path)}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-muted-foreground outline-none hover:bg-muted/70 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30",
+          rootGroup && "text-[10px] font-semibold uppercase tracking-[0.12em]",
+          !rootGroup && "text-xs font-medium",
+        )}
+        style={{ paddingLeft: `${8 + depth * 14}px` }}
+        aria-expanded={isExpanded}
+      >
+        <ChevronRight className={cn("size-3 shrink-0 transition-transform", isExpanded && "rotate-90")} />
+        {isExpanded ? <FolderOpen className="size-3.5 shrink-0 text-primary" /> : <Folder className="size-3.5 shrink-0" />}
+        <span className="min-w-0 flex-1 truncate">{rootGroup ? groupLabel(node.entry.path) : node.label}</span>
+        <span className="font-mono text-[9px] font-normal">{node.fileCount}</span>
+      </button>
+      {isExpanded ? (
+        <div>
+          {node.children.map((child) => (
+            <TreeNodeRow
+              key={child.entry.path}
+              node={child}
+              depth={depth + 1}
+              activePath={activePath}
+              expanded={expanded}
+              forceExpanded={forceExpanded}
+              onToggle={onToggle}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function FileRow({
   file,
+  label,
+  depth,
   active,
   onClick,
 }: {
   file: ExplorerFile;
+  label: string;
+  depth: number;
   active: boolean;
   onClick: () => void;
 }) {
   const Icon = fileIcon(file.path);
-  const segments = file.path.split("/");
-  const filename = segments.at(-1) ?? file.path;
-  const context = segments.length > 2 ? segments.at(-2) : undefined;
-
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "group flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/30",
+        "group flex w-full items-center gap-2 rounded-lg py-2 pr-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/30",
         active
           ? "bg-primary-soft text-foreground"
           : "text-muted-foreground hover:bg-muted/80 hover:text-foreground",
       )}
+      style={{ paddingLeft: `${10 + depth * 14}px` }}
     >
       <Icon className={cn("size-3.5 shrink-0", active && "text-primary")} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-medium">{filename}</span>
-        {context && (
-          <span className="block truncate font-mono text-[9px] text-muted-foreground/75">
-            {context}
-          </span>
-        )}
-      </span>
-      {file.size > 1_000_000 && <Badge variant="amber">大文件</Badge>}
+      <span className="min-w-0 flex-1 truncate text-xs font-medium">{label}</span>
+      {file.role === "source-json" ? <Badge variant="blue">完整</Badge> : null}
+      {file.size > 1_000_000 ? <Badge variant="amber">大文件</Badge> : null}
     </button>
   );
 }
 
-function groupRank(group: string) {
-  const rank = groupOrder.indexOf(group);
-  return rank === -1 ? groupOrder.length : rank;
+function buildTree(files: ExplorerFile[]): ExplorerNode[] {
+  const nodes = new Map<string, ExplorerNode>();
+  for (const entry of files) {
+    nodes.set(entry.path, {
+      entry,
+      label: entry.displayName ?? entry.path.split("/").at(-1) ?? entry.path,
+      children: [],
+      fileCount: entry.type === "file" ? 1 : 0,
+    });
+  }
+
+  const roots: ExplorerNode[] = [];
+  for (const node of nodes.values()) {
+    const separator = node.entry.path.lastIndexOf("/");
+    const parentPath = separator < 0 ? "" : node.entry.path.slice(0, separator);
+    const parent = parentPath ? nodes.get(parentPath) : undefined;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+
+  const finalize = (node: ExplorerNode): number => {
+    node.children.sort(compareNodes);
+    node.fileCount = node.entry.type === "file"
+      ? 1
+      : node.children.reduce((sum, child) => sum + finalize(child), 0);
+    return node.fileCount;
+  };
+  roots.sort(compareNodes);
+  roots.forEach(finalize);
+  return roots;
+}
+
+function filterTree(nodes: ExplorerNode[], query: string): ExplorerNode[] {
+  const output: ExplorerNode[] = [];
+  for (const node of nodes) {
+    const selfMatches = `${node.label} ${node.entry.path}`.toLowerCase().includes(query);
+    const children = selfMatches ? node.children : filterTree(node.children, query);
+    if (selfMatches || children.length > 0) output.push({ ...node, children });
+  }
+  return output;
+}
+
+function compareNodes(left: ExplorerNode, right: ExplorerNode) {
+  const leftRootRank = rootRank(left.entry.path);
+  const rightRootRank = rootRank(right.entry.path);
+  if (leftRootRank !== rightRootRank) return leftRootRank - rightRootRank;
+  if (left.entry.type !== right.entry.type) return left.entry.type === "directory" ? -1 : 1;
+  const leftOrder = left.entry.order ?? Number.MAX_SAFE_INTEGER;
+  const rightOrder = right.entry.order ?? Number.MAX_SAFE_INTEGER;
+  if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+  const leftFileRank = fileRank(left.label);
+  const rightFileRank = fileRank(right.label);
+  if (leftFileRank !== rightFileRank) return leftFileRank - rightFileRank;
+  return left.label.localeCompare(right.label, "zh-CN");
+}
+
+function rootRank(path: string) {
+  if (path.includes("/")) return 0;
+  if (path === "preset.json") return -30;
+  if (path === "project.json") return -20;
+  if (path === "preset.base.json") return -10;
+  const group = groupOrder.indexOf(path);
+  return group === -1 ? groupOrder.length + 10 : group;
+}
+
+function fileRank(name: string) {
+  const ranks: Record<string, number> = {
+    "meta.json": 0,
+    "content.md": 1,
+    "content.js": 1,
+    "find.txt": 1,
+    "replace.html": 2,
+    "index.json": 90,
+    "prompt-order.json": 91,
+  };
+  return ranks[name] ?? 50;
 }
 
 function groupLabel(group: string) {
@@ -218,7 +345,7 @@ function groupLabel(group: string) {
     scripts: "Scripts",
     snapshots: "只读快照",
     output: "构建输出",
-    project: "工程配置",
+    recovery: "恢复数据",
   };
   return labels[group] ?? group;
 }

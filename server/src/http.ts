@@ -637,6 +637,36 @@ export function createApiServer(options: ApiServerOptions = {}): {
         sendJson(response, 200, { project: await store.getProject(projectMatch[1] as string) });
         return;
       }
+      if (projectMatch && request.method === "DELETE") {
+        const projectId = projectMatch[1] as string;
+        await store.deleteProject(projectId);
+        stSessions.invalidateProjectPreviews(projectId);
+        response.statusCode = 204;
+        response.setHeader("Cache-Control", "no-store");
+        response.end();
+        return;
+      }
+
+      const sourceJsonMatch = /^\/api\/projects\/([^/]+)\/source-json$/.exec(pathname);
+      if (sourceJsonMatch && request.method === "GET") {
+        const file = await store.readSourceJson(sourceJsonMatch[1] as string);
+        response.setHeader("ETag", `"${file.revision}"`);
+        sendJson(response, 200, file);
+        return;
+      }
+      if (sourceJsonMatch && request.method === "PUT") {
+        const body = parseJsonBuffer(await readRequestBody(request, bodyLimit));
+        if (!isJsonObject(body) || typeof body.content !== "string" || typeof body.ifRevision !== "string") {
+          throw new ApiError(400, "INVALID_INPUT", "Request body must contain string content and ifRevision");
+        }
+        const file = await store.replaceSourceJson(sourceJsonMatch[1] as string, {
+          content: body.content,
+          ifRevision: body.ifRevision,
+        });
+        response.setHeader("ETag", `"${file.revision}"`);
+        sendJson(response, 200, file);
+        return;
+      }
 
       const archiveMatch = /^\/api\/projects\/([^/]+)\/archive$/.exec(pathname);
       if (archiveMatch && request.method === "GET") {

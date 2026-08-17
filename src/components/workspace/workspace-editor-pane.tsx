@@ -12,6 +12,7 @@ import {
 
 import { AdaptiveCodeEditor } from "../editor";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
 
 export type SaveState = "saved" | "saving" | "dirty" | "error";
 
@@ -23,9 +24,11 @@ interface WorkspaceEditorPaneProps {
   lineCount: number;
   revision?: string;
   saveState: SaveState;
+  saveMode?: "auto" | "explicit";
   error?: string;
   onChange: (content: string) => void;
   onFlush: () => void;
+  onApply?: () => void;
 }
 
 export function WorkspaceEditorPane({
@@ -36,9 +39,11 @@ export function WorkspaceEditorPane({
   lineCount,
   revision,
   saveState,
+  saveMode = "auto",
   error,
   onChange,
   onFlush,
+  onApply,
 }: WorkspaceEditorPaneProps) {
   const filename = path.split("/").at(-1) ?? path;
   const language = languageFromPath(path);
@@ -47,7 +52,19 @@ export function WorkspaceEditorPane({
   const FileIcon = iconFromLanguage(language);
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-editor">
+    <main
+      className="flex min-w-0 flex-1 flex-col bg-editor"
+      onKeyDownCapture={(event) => {
+        if (
+          saveMode === "explicit" &&
+          (event.ctrlKey || event.metaKey) &&
+          event.key.toLowerCase() === "s"
+        ) {
+          event.preventDefault();
+          onApply?.();
+        }
+      }}
+    >
       <div className="flex h-10 shrink-0 items-end border-b border-border bg-surface px-2">
         <div className="flex h-9 min-w-0 max-w-[80%] items-center gap-2 border-x border-t border-border bg-editor px-3 text-xs">
           <FileIcon className="size-3.5 text-primary" />
@@ -67,7 +84,24 @@ export function WorkspaceEditorPane({
         <Badge variant="blue">{editorLabel(language)}</Badge>
         {largeFile && <Badge variant="amber">大文件模式</Badge>}
         {readOnly && <Badge>只读</Badge>}
+        {saveMode === "explicit" ? (
+          <Button
+            size="sm"
+            disabled={saveState === "saved" || saveState === "saving"}
+            onClick={onApply}
+          >
+            {saveState === "saving" ? <LoaderCircle className="animate-spin" /> : <Save />}
+            应用并重新拆分
+          </Button>
+        ) : null}
       </div>
+
+      {saveMode === "explicit" ? (
+        <div className="flex shrink-0 items-center gap-2 border-b border-primary/15 bg-primary-soft/45 px-3 py-2 text-xs text-muted-foreground">
+          <AlertTriangle className="size-3.5 text-primary" />
+          完整 JSON 只会在点击“应用并重新拆分”或按 Ctrl/Cmd+S 后写入工程。
+        </div>
+      ) : null}
 
       {largeFile && (
         <div className="flex shrink-0 items-center gap-2 border-b border-warning/20 bg-warning-soft/70 px-3 py-2 text-xs text-warning">
@@ -93,7 +127,7 @@ export function WorkspaceEditorPane({
           ) {
             return;
           }
-          onFlush();
+          if (saveMode === "auto") onFlush();
         }}
       >
         <AdaptiveCodeEditor
@@ -109,7 +143,7 @@ export function WorkspaceEditorPane({
       </div>
 
       <div className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 text-[10px] text-muted-foreground">
-        <SaveIndicator state={saveState} />
+        <SaveIndicator state={saveState} mode={saveMode} />
         <span>UTF-8</span>
         <span>LF</span>
         <span className="hidden sm:inline">
@@ -126,7 +160,7 @@ export function WorkspaceEditorPane({
   );
 }
 
-function SaveIndicator({ state }: { state: SaveState }) {
+function SaveIndicator({ state, mode }: { state: SaveState; mode: "auto" | "explicit" }) {
   if (state === "saving") {
     return (
       <span className="flex items-center gap-1 text-primary">
@@ -147,7 +181,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
     return (
       <span className="flex items-center gap-1 text-warning">
         <Save className="size-3" />
-        等待自动保存
+        {mode === "explicit" ? "完整 JSON 待应用" : "等待自动保存"}
       </span>
     );
   }

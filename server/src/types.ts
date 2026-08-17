@@ -56,6 +56,9 @@ export interface ProjectFileEntry {
   type: "file" | "directory";
   size: number;
   updatedAt: string;
+  displayName?: string;
+  order?: number;
+  role?: "source-json";
 }
 
 export interface ProjectFile {
@@ -64,6 +67,7 @@ export interface ProjectFile {
   size: number;
   revision: string;
   updatedAt: string;
+  role?: "source-json";
 }
 
 export interface Diagnostic {

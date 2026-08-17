@@ -33,6 +33,49 @@ export type WorkspaceSaveState =
   | "saved"
   | "error";
 
+export type WorkspaceSaveMode = "auto" | "explicit";
+
+export class ExplicitSourceDraftError extends Error {
+  constructor() {
+    super("Complete preset JSON has unapplied changes");
+    this.name = "ExplicitSourceDraftError";
+  }
+}
+
+const WORKSPACE_SELECTION_KEY = "preset-studio:workspace-selection:v1";
+
+function workspaceWasClosed() {
+  try {
+    const value = localStorage.getItem(WORKSPACE_SELECTION_KEY);
+    if (!value) return false;
+    const parsed = JSON.parse(value) as unknown;
+    return Boolean(
+      parsed &&
+        typeof parsed === "object" &&
+        "state" in parsed &&
+        parsed.state === "closed",
+    );
+  } catch {
+    return false;
+  }
+}
+
+function rememberClosedWorkspace() {
+  try {
+    localStorage.setItem(WORKSPACE_SELECTION_KEY, JSON.stringify({ state: "closed" }));
+  } catch {
+    // A blocked storage area must not prevent closing a project.
+  }
+}
+
+function forgetClosedWorkspace() {
+  try {
+    localStorage.removeItem(WORKSPACE_SELECTION_KEY);
+  } catch {
+    // Opening a project still succeeds when storage is unavailable.
+  }
+}
+
 export interface UseProjectWorkspaceOptions {
   api?: ProjectApi;
   initialProjectId?: string;
@@ -49,6 +92,8 @@ export interface UseProjectWorkspaceResult {
   activeFile: ProjectFile | null;
   content: string;
   isDirty: boolean;
+  saveMode: WorkspaceSaveMode;
+  hasExplicitDraft: boolean;
   saveState: WorkspaceSaveState;
   error: Error | null;
   isLoadingProjects: boolean;
@@ -60,9 +105,12 @@ export interface UseProjectWorkspaceResult {
     projectId: string,
     preferredFilePath?: string,
   ) => Promise<void>;
+  closeProject: () => Promise<void>;
+  deleteProject: (projectId: string) => Promise<void>;
   selectFile: (file: ProjectFileEntry | string) => Promise<void>;
   setContent: (value: SetStateAction<string>) => void;
   flushSave: () => Promise<ProjectFile | null>;
+  discardChanges: () => void;
   handleEditorBlur: () => void;
   createProject: (input: CreateProjectInput) => Promise<Project>;
   createProjectFromSt: (input: CreateProjectFromStInput) => Promise<Project>;
@@ -96,6 +144,10 @@ function firstEditableFile(files: ProjectFileEntry[]) {
     files.find((file) => file.kind === "file") ??
     null
   );
+}
+
+function isSourceJsonFile(file: ProjectFileEntry | null | undefined) {
+  return file?.role === "source-json" || file?.path === "preset.json";
 }
 
 function mergeProjectSummary(
@@ -149,6 +201,7 @@ export function useProjectWorkspace(
   const dirtyRef = useRef(false);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savePromiseRef = useRef<Promise<ProjectFile> | null>(null);
+  const deletingProjectRef = useRef<string | null>(null);
   const projectsAbortRef = useRef<AbortController | null>(null);
   const projectAbortRef = useRef<AbortController | null>(null);
   const fileAbortRef = useRef<AbortController | null>(null);
@@ -221,6 +274,21 @@ export function useProjectWorkspace(
         const savedFile = await request;
         const current = activeFileRef.current;
 
+        if (isSourceJsonFile(savedFile)) {
+          const [updatedProject, updatedFiles] = await Promise.all([
+            api.getProject(savedProjectId),
+            api.listProjectFiles(savedProjectId),
+          ]);
+          if (projectRef.current?.id === savedProjectId) {
+            projectRef.current = updatedProject;
+            if (mountedRef.current) {
+              setProject(updatedProject);
+              setFiles(updatedFiles);
+              setProjects((projects) => mergeProjectSummary(projects, updatedProject));
+            }
+          }
+        }
+
         if (
           projectRef.current?.id === savedProjectId &&
           current?.path === savedPath
@@ -234,18 +302,20 @@ export function useProjectWorkspace(
           activeFileRef.current = mergedFile;
           if (mountedRef.current) {
             setActiveFile(mergedFile);
-            setFiles((currentFiles) =>
-              currentFiles.map((file) =>
-                file.path === savedPath
-                  ? {
-                      ...file,
-                      size: savedFile.size,
-                      revision: savedFile.revision,
-                      updatedAt: savedFile.updatedAt,
-                    }
-                  : file,
-              ),
-            );
+            if (!isSourceJsonFile(savedFile)) {
+              setFiles((currentFiles) =>
+                currentFiles.map((file) =>
+                  file.path === savedPath
+                    ? {
+                        ...file,
+                        size: savedFile.size,
+                        revision: savedFile.revision,
+                        updatedAt: savedFile.updatedAt,
+                      }
+                    : file,
+                ),
+              );
+            }
             setSaveState(dirtyRef.current ? "dirty" : "saved");
             setIsDirty(dirtyRef.current);
           }
@@ -265,7 +335,13 @@ export function useProjectWorkspace(
       clearAutosaveTimer();
       // If the buffer changed while saving, loop once more with the revision
       // returned by the preceding PUT. Otherwise this is a complete flush.
-      if (!dirtyRef.current) return activeFileRef.current;
+      if (
+        !dirtyRef.current ||
+        isSourceJsonFile(activeFileRef.current) ||
+        deletingProjectRef.current === savedProjectId
+      ) {
+        return activeFileRef.current;
+      }
     }
   }, [api, clearAutosaveTimer, reportError]);
 
@@ -293,10 +369,17 @@ export function useProjectWorkspace(
       setIsDirty(true);
       setSaveState("dirty");
       setError(null);
-      scheduleAutosave();
+      if (!isSourceJsonFile(activeFileRef.current)) scheduleAutosave();
     },
     [scheduleAutosave],
   );
+
+  const flushBeforeOperation = useCallback(async () => {
+    if (dirtyRef.current && isSourceJsonFile(activeFileRef.current)) {
+      throw new ExplicitSourceDraftError();
+    }
+    return flushSave();
+  }, [flushSave]);
 
   const selectFile = useCallback(
     async (file: ProjectFileEntry | string) => {
@@ -304,7 +387,7 @@ export function useProjectWorkspace(
       if (typeof file !== "string" && file.kind === "directory") return;
       if (activeFileRef.current?.path === path) return;
 
-      await flushSave();
+      await flushBeforeOperation();
       const currentProject = projectRef.current;
       if (!currentProject) throw new Error("No project is currently open");
 
@@ -335,12 +418,12 @@ export function useProjectWorkspace(
         }
       }
     },
-    [api, applyLoadedFile, flushSave, reportError],
+    [api, applyLoadedFile, flushBeforeOperation, reportError],
   );
 
   const openProject = useCallback(
     async (projectId: string, preferredFilePath?: string) => {
-      await flushSave();
+      await flushBeforeOperation();
       projectAbortRef.current?.abort();
       fileAbortRef.current?.abort();
       const controller = new AbortController();
@@ -382,6 +465,7 @@ export function useProjectWorkspace(
         }
 
         projectRef.current = loadedProject;
+        forgetClosedWorkspace();
         setProject(loadedProject);
         setFiles(loadedFiles);
         setProjects((current) =>
@@ -399,7 +483,7 @@ export function useProjectWorkspace(
         }
       }
     },
-    [api, applyLoadedFile, flushSave, reportError],
+    [api, applyLoadedFile, flushBeforeOperation, reportError],
   );
 
   const refreshProjects = useCallback(async () => {
@@ -434,7 +518,7 @@ export function useProjectWorkspace(
 
   const createProject = useCallback(
     async (input: CreateProjectInput) => {
-      await flushSave();
+      await flushBeforeOperation();
       let created: Project;
       try {
         created = await api.createProject(input);
@@ -448,12 +532,12 @@ export function useProjectWorkspace(
       await openProject(created.id);
       return created;
     },
-    [api, flushSave, openProject, reportError],
+    [api, flushBeforeOperation, openProject, reportError],
   );
 
   const createProjectFromSt = useCallback(
     async (input: CreateProjectFromStInput) => {
-      await flushSave();
+      await flushBeforeOperation();
       let created: Project;
       try {
         created = await api.createProjectFromSt(input);
@@ -467,12 +551,12 @@ export function useProjectWorkspace(
       await openProject(created.id);
       return created;
     },
-    [api, flushSave, openProject, reportError],
+    [api, flushBeforeOperation, openProject, reportError],
   );
 
   const importProjectJson = useCallback(
     async (file: File, input?: ImportProjectInput) => {
-      await flushSave();
+      await flushBeforeOperation();
       let imported: Project;
       try {
         imported = await api.importProjectJson(file, input);
@@ -486,12 +570,12 @@ export function useProjectWorkspace(
       await openProject(imported.id);
       return imported;
     },
-    [api, flushSave, openProject, reportError],
+    [api, flushBeforeOperation, openProject, reportError],
   );
 
   const importProjectArchive = useCallback(
     async (file: File, input?: ImportProjectArchiveInput) => {
-      await flushSave();
+      await flushBeforeOperation();
       let result: ProjectArchiveImportResult;
       try {
         result = await api.importProjectArchive(file, input);
@@ -507,12 +591,12 @@ export function useProjectWorkspace(
       await openProject(result.project.id);
       return result;
     },
-    [api, flushSave, openProject, reportError],
+    [api, flushBeforeOperation, openProject, reportError],
   );
 
   const buildProject = useCallback(
     async (input?: BuildProjectInput) => {
-      await flushSave();
+      await flushBeforeOperation();
       const currentProject = projectRef.current;
       if (!currentProject) throw new Error("No project is currently open");
       try {
@@ -522,12 +606,12 @@ export function useProjectWorkspace(
         throw caught;
       }
     },
-    [api, flushSave, reportError],
+    [api, flushBeforeOperation, reportError],
   );
 
   const exportProject = useCallback(
     async (input?: ExportProjectInput) => {
-      await flushSave();
+      await flushBeforeOperation();
       const currentProject = projectRef.current;
       if (!currentProject) throw new Error("No project is currently open");
       try {
@@ -537,11 +621,11 @@ export function useProjectWorkspace(
         throw caught;
       }
     },
-    [api, flushSave, reportError],
+    [api, flushBeforeOperation, reportError],
   );
 
   const downloadProjectArchive = useCallback(async () => {
-    await flushSave();
+    await flushBeforeOperation();
     const currentProject = projectRef.current;
     if (!currentProject) throw new Error("No project is currently open");
     try {
@@ -550,9 +634,70 @@ export function useProjectWorkspace(
       reportError(caught);
       throw caught;
     }
-  }, [api, flushSave, reportError]);
+  }, [api, flushBeforeOperation, reportError]);
+
+  const discardChanges = useCallback(() => {
+    clearAutosaveTimer();
+    const current = activeFileRef.current;
+    if (!current) return;
+    applyLoadedFile(current);
+    setError(null);
+  }, [applyLoadedFile, clearAutosaveTimer]);
+
+  const clearWorkspace = useCallback(() => {
+    clearAutosaveTimer();
+    projectAbortRef.current?.abort();
+    fileAbortRef.current?.abort();
+    projectAbortRef.current = null;
+    fileAbortRef.current = null;
+    projectRef.current = null;
+    setProject(null);
+    setFiles([]);
+    applyLoadedFile(null);
+    setIsLoadingProject(false);
+    setIsLoadingFile(false);
+    setError(null);
+  }, [applyLoadedFile, clearAutosaveTimer]);
+
+  const closeProject = useCallback(async () => {
+    await flushBeforeOperation();
+    clearWorkspace();
+    rememberClosedWorkspace();
+  }, [clearWorkspace, flushBeforeOperation]);
+
+  const deleteProject = useCallback(
+    async (projectId: string) => {
+      const deletingActive = projectRef.current?.id === projectId;
+      if (deletingActive) {
+        clearAutosaveTimer();
+        deletingProjectRef.current = projectId;
+        await savePromiseRef.current?.catch(() => undefined);
+      }
+      try {
+        await api.deleteProject(projectId);
+      } catch (caught) {
+        if (deletingActive) deletingProjectRef.current = null;
+        if (deletingActive && dirtyRef.current && !isSourceJsonFile(activeFileRef.current)) {
+          scheduleAutosave();
+        }
+        reportError(caught);
+        throw caught;
+      }
+
+      if (mountedRef.current) {
+        setProjects((current) => current.filter((item) => item.id !== projectId));
+      }
+      if (deletingActive) {
+        deletingProjectRef.current = null;
+        clearWorkspace();
+        rememberClosedWorkspace();
+      }
+    },
+    [api, clearAutosaveTimer, clearWorkspace, reportError, scheduleAutosave],
+  );
 
   const handleEditorBlur = useCallback(() => {
+    if (isSourceJsonFile(activeFileRef.current)) return;
     void flushSave().catch(() => {
       // The hook exposes error/saveState for the UI to surface.
     });
@@ -566,7 +711,9 @@ export function useProjectWorkspace(
       void (async () => {
         try {
           const loadedProjects = await refreshProjects();
-          const initialId = options.initialProjectId ?? loadedProjects[0]?.id;
+          const initialId =
+            options.initialProjectId ??
+            (workspaceWasClosed() ? undefined : loadedProjects[0]?.id);
           if (initialId) {
             await openProject(initialId, options.initialFilePath);
           }
@@ -600,6 +747,8 @@ export function useProjectWorkspace(
     activeFile,
     content,
     isDirty,
+    saveMode: isSourceJsonFile(activeFile) ? "explicit" : "auto",
+    hasExplicitDraft: isDirty && isSourceJsonFile(activeFile),
     saveState,
     error,
     isLoadingProjects,
@@ -608,9 +757,12 @@ export function useProjectWorkspace(
     isLoading: isLoadingProjects || isLoadingProject || isLoadingFile,
     refreshProjects,
     openProject,
+    closeProject,
+    deleteProject,
     selectFile,
     setContent,
     flushSave,
+    discardChanges,
     handleEditorBlur,
     createProject,
     createProjectFromSt,

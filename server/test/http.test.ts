@@ -64,6 +64,33 @@ test("HTTP project lifecycle supports JSON import, file access, build, and expor
     assert.equal(build.success, true);
     assert.equal(build.preset.prompts[0]?.content, "Hello API");
 
+    const reservedSourceWrite = await fetch(
+      `${base}/api/projects/${imported.project.id}/files/preset.json`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "{}" }),
+      },
+    );
+    assert.equal(reservedSourceWrite.status, 400);
+    assert.equal(
+      (await reservedSourceWrite.json() as { error: { code: string } }).error.code,
+      "RESERVED_SOURCE_PATH",
+    );
+
+    const sourceResponse = await fetch(`${base}/api/projects/${imported.project.id}/source-json`);
+    assert.equal(sourceResponse.status, 200);
+    const source = await sourceResponse.json() as { content: string; revision: string; role: string };
+    assert.equal(source.role, "source-json");
+    const completePreset = JSON.parse(source.content) as ReturnType<typeof minimalPreset>;
+    completePreset.prompts[0]!.content = "Hello complete JSON";
+    const appliedSourceResponse = await fetch(`${base}/api/projects/${imported.project.id}/source-json`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: JSON.stringify(completePreset), ifRevision: source.revision }),
+    });
+    assert.equal(appliedSourceResponse.status, 200);
+
     const exportResponse = await fetch(`${base}/api/projects/${imported.project.id}/export`, { method: "POST" });
     assert.equal(exportResponse.status, 201);
     const exported = await exportResponse.json() as { downloadUrl: string; filename: string };
@@ -71,7 +98,7 @@ test("HTTP project lifecycle supports JSON import, file access, build, and expor
     assert.equal(downloadResponse.status, 200);
     assert.match(downloadResponse.headers.get("content-disposition") ?? "", /attachment/);
     const downloaded = await downloadResponse.json() as { prompts: Array<{ content: string }> };
-    assert.equal(downloaded.prompts[0]?.content, "Hello API");
+    assert.equal(downloaded.prompts[0]?.content, "Hello complete JSON");
 
     const archiveResponse = await fetch(`${base}/api/projects/${imported.project.id}/archive`);
     assert.equal(archiveResponse.status, 200);
@@ -96,6 +123,16 @@ test("HTTP project lifecycle supports JSON import, file access, build, and expor
     assert.equal(archiveImport.project.version, "v2");
     assert.equal(archiveImport.import.originalProjectId, imported.project.id);
     assert.equal(archiveImport.import.idRegenerated, true);
+
+    const deleteResponse = await fetch(`${base}/api/projects/${imported.project.id}`, { method: "DELETE" });
+    assert.equal(deleteResponse.status, 204);
+    assert.equal(await deleteResponse.text(), "");
+    assert.equal((await fetch(`${base}/api/projects/${imported.project.id}`)).status, 404);
+    assert.equal((await fetch(`${base}/api/projects/${imported.project.id}/files`)).status, 404);
+    assert.equal((await fetch(`${base}/api/projects/${imported.project.id}/source-json`)).status, 404);
+    assert.equal((await fetch(`${base}/api/projects/${imported.project.id}/build`, { method: "POST" })).status, 404);
+    assert.equal((await fetch(`${base}/api/projects/${imported.project.id}/archive`)).status, 404);
+    assert.equal((await fetch(`${base}/api/projects/${archiveImport.project.id}`)).status, 200);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });

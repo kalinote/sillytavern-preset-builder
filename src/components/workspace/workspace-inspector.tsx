@@ -29,6 +29,7 @@ interface WorkspaceInspectorProps {
   lineCount: number;
   revision?: string | null;
   saveState: SaveState;
+  saveMode: "auto" | "explicit";
   backendOnline: boolean;
   className?: string;
   initialTab?: "file" | "preview";
@@ -41,6 +42,7 @@ export function WorkspaceInspector({
   lineCount,
   revision,
   saveState,
+  saveMode,
   backendOnline,
   className,
   initialTab = "file",
@@ -91,9 +93,11 @@ export function WorkspaceInspector({
                     )}
                   </span>
                   <div>
-                    <p className="text-xs font-medium">{saveLabel(saveState)}</p>
+                    <p className="text-xs font-medium">{saveLabel(saveState, saveMode)}</p>
                     <p className="mt-0.5 text-[10px] text-muted-foreground">
-                      850ms 防抖 · 切换与失焦强制写盘
+                      {saveMode === "explicit"
+                        ? "显式应用 · Ctrl/Cmd+S 重新拆分"
+                        : "850ms 防抖 · 切换与失焦强制写盘"}
                     </p>
                   </div>
                 </div>
@@ -110,7 +114,9 @@ export function WorkspaceInspector({
               <div className="flex items-start gap-2 rounded-xl border border-primary/15 bg-primary-soft/45 p-3">
                 <Info className="mt-0.5 size-4 shrink-0 text-primary" />
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  自动保存只更新拆分工程文件；不会导出 JSON、推送或修改 SillyTavern。
+                  {saveMode === "explicit"
+                    ? "完整 JSON 草稿只保留在浏览器中；应用后会校验并重新拆分当前工程。"
+                    : "自动保存只更新拆分工程文件；不会导出 JSON、推送或修改 SillyTavern。"}
                 </p>
               </div>
             </InspectorSection>
@@ -462,9 +468,11 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function saveLabel(state: SaveState) {
+function saveLabel(state: SaveState, saveMode: "auto" | "explicit") {
   if (state === "saving") return "正在写入工程";
-  if (state === "dirty") return "等待自动保存";
+  if (state === "dirty") {
+    return saveMode === "explicit" ? "完整 JSON 等待应用" : "等待自动保存";
+  }
   if (state === "error") return "保存失败";
   return "工程文件已保存";
 }

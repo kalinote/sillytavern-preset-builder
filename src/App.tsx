@@ -29,6 +29,10 @@ import {
 import { WorkspaceInspector } from "./components/workspace/workspace-inspector";
 import { WorkspaceInspectorDrawer } from "./components/workspace/workspace-inspector-drawer";
 import { WorkspaceTopBar } from "./components/workspace/workspace-top-bar";
+import {
+  DeleteProjectDialog,
+  ExplicitDraftDialog,
+} from "./components/workspace/workspace-workflow-dialogs";
 import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { useProjectWorkspace } from "./hooks/use-project-workspace";
@@ -58,6 +62,12 @@ export default function App() {
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>("editor");
   const [operationBusy, setOperationBusy] = useState(false);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftDialogOpen, setDraftDialogOpen] = useState(false);
+  const [draftActionLabel, setDraftActionLabel] = useState("继续");
+  const [pendingDelete, setPendingDelete] = useState<ProjectChoice | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const pendingWorkspaceActionRef = useRef<(() => void | Promise<void>) | null>(null);
   const inspectorDrawerTriggerRef = useRef<HTMLButtonElement>(null);
   const clearWorkspaceError = workspace.clearError;
   const desktopLayout = useMediaQuery(DESKTOP_EDITOR_QUERY, true);
@@ -95,17 +105,10 @@ export default function App() {
       });
       return;
     }
-    const [, projectsResult] = await Promise.allSettled([
+    await Promise.allSettled([
       st.refreshSession(),
       workspace.refreshProjects(),
     ]);
-    if (
-      projectsResult.status === "fulfilled" &&
-      !workspace.project &&
-      projectsResult.value[0]
-    ) {
-      await workspace.openProject(projectsResult.value[0].id);
-    }
   };
 
   const projectChoices = useMemo<ProjectChoice[]>(
@@ -128,24 +131,71 @@ export default function App() {
           ? "error"
           : "saved";
 
-  const runOperation = async (
-    operation: () => Promise<void>,
-    successMessage?: string,
-  ) => {
-    setOperationBusy(true);
+  const runOperation = useCallback(
+    async (operation: () => Promise<void>, successMessage?: string) => {
+      setOperationBusy(true);
+      try {
+        await operation();
+        setBackendOnline(true);
+        clearWorkspaceError();
+        if (successMessage) toast.success(successMessage);
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : "发生未知工程错误。";
+        toast.error("工程操作失败", { description: message });
+      } finally {
+        setOperationBusy(false);
+      }
+    },
+    [clearWorkspaceError],
+  );
+
+  const requestWorkspaceAction = useCallback(
+    (action: () => void | Promise<void>, actionLabel = "继续") => {
+      if (workspace.hasExplicitDraft) {
+        pendingWorkspaceActionRef.current = action;
+        setDraftActionLabel(actionLabel);
+        setDraftDialogOpen(true);
+        return;
+      }
+      runSafely(action);
+    },
+    [workspace.hasExplicitDraft],
+  );
+
+  const continuePendingWorkspaceAction = useCallback(() => {
+    const action = pendingWorkspaceActionRef.current;
+    pendingWorkspaceActionRef.current = null;
+    setDraftActionLabel("继续");
+    setDraftDialogOpen(false);
+    if (action) runSafely(action);
+  }, []);
+
+  const cancelPendingWorkspaceAction = useCallback(() => {
+    pendingWorkspaceActionRef.current = null;
+    setDraftActionLabel("继续");
+    setDraftDialogOpen(false);
+  }, []);
+
+  const applyDraftAndContinue = useCallback(async () => {
+    setDraftBusy(true);
     try {
-      await operation();
-      setBackendOnline(true);
-      workspace.clearError();
-      if (successMessage) toast.success(successMessage);
+      await workspace.flushSave();
+      toast.success("完整 JSON 已应用并重新拆分");
+      continuePendingWorkspaceAction();
     } catch (caught) {
-      const message =
-        caught instanceof Error ? caught.message : "发生未知工程错误。";
-      toast.error("工程操作失败", { description: message });
+      toast.error("完整 JSON 应用失败", {
+        description: caught instanceof Error ? caught.message : "请检查 JSON 内容后重试。",
+      });
     } finally {
-      setOperationBusy(false);
+      setDraftBusy(false);
     }
-  };
+  }, [continuePendingWorkspaceAction, workspace]);
+
+  const discardDraftAndContinue = useCallback(() => {
+    workspace.discardChanges();
+    continuePendingWorkspaceAction();
+  }, [continuePendingWorkspaceAction, workspace]);
 
   const handleExport = () =>
     runOperation(async () => {
@@ -167,6 +217,46 @@ export default function App() {
       });
     });
 
+  const handleApplySourceJson = () =>
+    runOperation(async () => {
+      await workspace.flushSave();
+    }, "完整 JSON 已应用并重新拆分");
+
+  const handleCloseProject = () =>
+    runOperation(async () => {
+      await workspace.closeProject();
+      setPushDialogOpen(false);
+      setInspectorDrawerOpen(false);
+    }, "工程已关闭，服务器文件仍然保留");
+
+  const requestDeleteProject = (project: ProjectChoice) => {
+    setProjectDialogOpen(false);
+    setPendingDelete(project);
+  };
+
+  const cancelDeleteProject = () => {
+    if (deleteBusy) return;
+    setPendingDelete(null);
+    setProjectDialogOpen(true);
+  };
+
+  const confirmDeleteProject = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    try {
+      await workspace.deleteProject(pendingDelete.id);
+      toast.success(`工程“${pendingDelete.name}”已从服务器永久删除`);
+      setPendingDelete(null);
+      setProjectDialogOpen(true);
+    } catch (caught) {
+      toast.error("删除工程失败", {
+        description: caught instanceof Error ? caught.message : "无法删除服务器工程。",
+      });
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
   const activePath = workspace.activeFile?.path ?? "";
   const activeContent = workspace.content;
   const activeSize =
@@ -179,29 +269,36 @@ export default function App() {
         type: file.kind,
         size: file.size ?? 0,
         updatedAt: file.updatedAt ?? undefined,
+        displayName: file.displayName,
+        order: file.order,
+        role: file.role,
       })),
     [workspace.files],
   );
-  const openProjectManager = useCallback(() => {
+  const showProjectManager = useCallback(() => {
     setProjectDialogOpen(true);
     if (st.session?.status === "connected" && !st.catalog) {
       void st.refreshPresets().catch(() => undefined);
     }
   }, [st.catalog, st.refreshPresets, st.session?.status]);
+  const openProjectManager = useCallback(() => {
+    requestWorkspaceAction(showProjectManager);
+  }, [requestWorkspaceAction, showProjectManager]);
   const selectWorkspaceFile = workspace.selectFile;
   const handleDesktopFileSelect = useCallback(
     (path: string) => {
-      void selectWorkspaceFile(path).catch(() => undefined);
+      requestWorkspaceAction(() => selectWorkspaceFile(path));
     },
-    [selectWorkspaceFile],
+    [requestWorkspaceAction, selectWorkspaceFile],
   );
   const handleMobileFileSelect = useCallback(
     (path: string) => {
-      void selectWorkspaceFile(path)
-        .then(() => setMobileView("editor"))
-        .catch(() => undefined);
+      requestWorkspaceAction(async () => {
+        await selectWorkspaceFile(path);
+        setMobileView("editor");
+      });
     },
-    [selectWorkspaceFile],
+    [requestWorkspaceAction, selectWorkspaceFile],
   );
 
   return (
@@ -215,20 +312,22 @@ export default function App() {
           projectVersion={workspace.project?.version ?? undefined}
           hasProject={Boolean(workspace.project)}
           saveState={mappedSaveState}
+          saveMode={workspace.saveMode}
           backendOnline={backendOnline}
           stConnection={st.session}
           pushAvailable={Boolean(backendOnline && workspace.project && st.session?.status === "connected")}
           onToggleExplorer={() => setExplorerVisible((value) => !value)}
           onOpenProjects={openProjectManager}
+          onCloseProject={() => requestWorkspaceAction(handleCloseProject, "关闭")}
           onOpenConnection={() => setConnectionDialogOpen(true)}
-          onExport={() => void handleExport()}
-          onDownloadProject={() => void handleDownloadProject()}
+          onExport={() => requestWorkspaceAction(handleExport)}
+          onDownloadProject={() => requestWorkspaceAction(handleDownloadProject)}
           onPush={() => {
             if (st.session?.status !== "connected") {
               setConnectionDialogOpen(true);
               return;
             }
-            setPushDialogOpen(true);
+            requestWorkspaceAction(() => setPushDialogOpen(true));
           }}
         />
 
@@ -236,6 +335,7 @@ export default function App() {
           <ProjectEmptyState
             backendOnline={backendOnline}
             stConnected={st.session?.status === "connected"}
+            hasProjects={workspace.projects.length > 0}
             loading={workspace.isLoading || operationBusy}
             error={workspace.error?.message}
             onOpenProjects={openProjectManager}
@@ -270,9 +370,11 @@ export default function App() {
                 lineCount={activeLineCount}
                 revision={workspace.activeFile.revision ?? undefined}
                 saveState={mappedSaveState}
+                saveMode={workspace.saveMode}
                 error={workspace.error?.message}
                 onChange={workspace.setContent}
                 onFlush={workspace.handleEditorBlur}
+                onApply={() => void handleApplySourceJson()}
               />
 
               {inspectorVisible && (
@@ -288,6 +390,7 @@ export default function App() {
                     lineCount={activeLineCount}
                     revision={workspace.activeFile.revision}
                     saveState={mappedSaveState}
+                    saveMode={workspace.saveMode}
                     backendOnline={backendOnline}
                   />
                 </div>
@@ -335,6 +438,7 @@ export default function App() {
                     lineCount={activeLineCount}
                     revision={workspace.activeFile.revision}
                     saveState={mappedSaveState}
+                    saveMode={workspace.saveMode}
                     backendOnline={backendOnline}
                   />
                 </>
@@ -363,9 +467,11 @@ export default function App() {
                   lineCount={activeLineCount}
                   revision={workspace.activeFile.revision ?? undefined}
                   saveState={mappedSaveState}
+                  saveMode={workspace.saveMode}
                   error={workspace.error?.message}
                   onChange={workspace.setContent}
                   onFlush={workspace.handleEditorBlur}
+                  onApply={() => void handleApplySourceJson()}
                 />
               )}
               {mobileView === "preview" && (
@@ -377,6 +483,7 @@ export default function App() {
                   lineCount={activeLineCount}
                   revision={workspace.activeFile.revision}
                   saveState={mappedSaveState}
+                  saveMode={workspace.saveMode}
                   backendOnline={backendOnline}
                   initialTab="preview"
                 />
@@ -411,6 +518,12 @@ export default function App() {
               setProjectDialogOpen(false);
             })
           }
+          onCloseProject={() =>
+            runOperation(async () => {
+              await workspace.closeProject();
+            }, "工程已关闭，服务器文件仍然保留")
+          }
+          onDeleteProject={requestDeleteProject}
           onCreate={(input) =>
             runOperation(async () => {
               await workspace.createProject(input);
@@ -491,6 +604,22 @@ export default function App() {
             }}
           />
         ) : null}
+
+        <ExplicitDraftDialog
+          open={draftDialogOpen}
+          busy={draftBusy}
+          actionLabel={draftActionLabel}
+          onApply={() => void applyDraftAndContinue()}
+          onDiscard={discardDraftAndContinue}
+          onCancel={cancelPendingWorkspaceAction}
+        />
+
+        <DeleteProjectDialog
+          project={pendingDelete}
+          busy={deleteBusy}
+          onConfirm={() => void confirmDeleteProject()}
+          onCancel={cancelDeleteProject}
+        />
       </div>
     </TooltipProvider>
   );

@@ -24,6 +24,23 @@ import type {
 } from "./types.js";
 
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
+const SOURCE_JSON_PATH = "preset.json";
+const MANAGED_SOURCE_PATHS = ["preset.base.json", "prompts", "regex", "scripts", "project.json"] as const;
+
+interface ItemDirectoryMetadata {
+  displayName: string;
+  order: number;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 export interface ProjectBuildSnapshot {
   manifest: ProjectManifest;
@@ -251,13 +268,73 @@ export class ProjectStore {
   }
 
   async getProject(projectId: string): Promise<ProjectManifest> {
-    return this.readManifest(this.projectRoot(projectId));
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, () => this.readManifest(projectRoot));
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    const projectRoot = this.projectRoot(projectId);
+    await this.withProjectLock(projectId, async () => {
+      await this.readManifest(projectRoot);
+      await rm(projectRoot, { recursive: true, force: false });
+    });
+  }
+
+  private async readItemDirectoryMetadata(projectRoot: string): Promise<Map<string, ItemDirectoryMetadata>> {
+    const output = new Map<string, ItemDirectoryMetadata>();
+    const groups = [
+      { root: "prompts", fallback: "Prompt", secondary: "identifier" },
+      { root: "regex", fallback: "Regex", secondary: "id" },
+      { root: "scripts", fallback: "Script", secondary: "id" },
+    ] as const;
+
+    for (const group of groups) {
+      let value: unknown;
+      try {
+        value = JSON.parse(await readFile(join(projectRoot, group.root, "index.json"), "utf8")) as unknown;
+      } catch {
+        continue;
+      }
+      if (!isJsonObject(value) || !Array.isArray(value.items)) continue;
+
+      const used = new Set<string>();
+      for (let index = 0; index < value.items.length; index += 1) {
+        const item = value.items[index];
+        if (!isJsonObject(item) || typeof item.uid !== "string" || !item.uid) continue;
+        const primary = typeof item.name === "string" ? item.name.trim() : "";
+        const secondaryValue = item[group.secondary];
+        const secondary = typeof secondaryValue === "string" ? secondaryValue.trim() : "";
+        const baseName = primary || secondary || `未命名 ${group.fallback} ${index + 1}`;
+        let displayName = baseName;
+        let suffix = 2;
+        while (used.has(displayName)) {
+          displayName = `${baseName} (${suffix})`;
+          suffix += 1;
+        }
+        used.add(displayName);
+        output.set(`${group.root}/${item.uid}`, { displayName, order: index });
+      }
+    }
+    return output;
   }
 
   async listFiles(projectId: string): Promise<ProjectFileEntry[]> {
+    return this.withProjectLock(projectId, () => this.listFilesUnlocked(projectId));
+  }
+
+  private async listFilesUnlocked(projectId: string): Promise<ProjectFileEntry[]> {
     const projectRoot = this.projectRoot(projectId);
-    await this.readManifest(projectRoot);
-    const output: ProjectFileEntry[] = [];
+    const manifest = await this.readManifest(projectRoot);
+    const itemMetadata = await this.readItemDirectoryMetadata(projectRoot);
+    const output: ProjectFileEntry[] = [{
+      path: SOURCE_JSON_PATH,
+      type: "file",
+      size: 0,
+      updatedAt: manifest.updatedAt,
+      displayName: SOURCE_JSON_PATH,
+      order: -1,
+      role: "source-json",
+    }];
 
     const visit = async (directory: string): Promise<void> => {
       const entries = await readdir(directory, { withFileTypes: true });
@@ -267,8 +344,16 @@ export class ProjectStore {
         const absolute = join(directory, entry.name);
         const details = await stat(absolute);
         const path = relative(projectRoot, absolute).split(sep).join("/");
+        if (path === SOURCE_JSON_PATH) continue;
         if (entry.isDirectory()) {
-          output.push({ path, type: "directory", size: 0, updatedAt: details.mtime.toISOString() });
+          const metadata = itemMetadata.get(path);
+          output.push({
+            path,
+            type: "directory",
+            size: 0,
+            updatedAt: details.mtime.toISOString(),
+            ...(metadata ? metadata : {}),
+          });
           await visit(absolute);
         } else if (entry.isFile()) {
           output.push({ path, type: "file", size: details.size, updatedAt: details.mtime.toISOString() });
@@ -280,7 +365,145 @@ export class ProjectStore {
     return output;
   }
 
+  async readSourceJson(projectId: string): Promise<ProjectFile> {
+    const snapshot = await this.getProjectBuildSnapshot(projectId);
+    const content = stringifyJson(snapshot.build.preset);
+    return {
+      path: SOURCE_JSON_PATH,
+      content,
+      size: Buffer.byteLength(content),
+      revision: snapshot.build.revision,
+      updatedAt: snapshot.manifest.updatedAt,
+      role: "source-json",
+    };
+  }
+
+  async replaceSourceJson(
+    projectId: string,
+    input: { content: string; ifRevision: string },
+  ): Promise<ProjectFile> {
+    if (typeof input.content !== "string") {
+      throw new ApiError(400, "INVALID_INPUT", "content must be a string");
+    }
+    if (Buffer.byteLength(input.content) > MAX_FILE_BYTES) {
+      throw new ApiError(413, "FILE_TOO_LARGE", "Preset JSON is too large to apply");
+    }
+    let preset: unknown;
+    try {
+      preset = JSON.parse(input.content) as unknown;
+    } catch (error) {
+      throw new ApiError(422, "INVALID_SOURCE_JSON", "Complete preset JSON is not valid JSON", {
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (!isJsonObject(preset)) {
+      throw new ApiError(422, "INVALID_PRESET", "Preset JSON root must be an object");
+    }
+
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      const currentBuild = await buildPresetProject(projectRoot);
+      if (input.ifRevision !== currentBuild.revision) {
+        throw new ApiError(409, "REVISION_CONFLICT", "Project changed since the complete JSON was opened", {
+          expected: input.ifRevision,
+          actual: currentBuild.revision,
+        });
+      }
+
+      const stagingParent = join(this.workspaceRoot, ".staging");
+      const transactionId = randomUUID();
+      const stagedRoot = join(stagingParent, `source-${projectId}-${transactionId}`);
+      const backupRoot = join(stagingParent, `backup-${projectId}-${transactionId}`);
+      await mkdir(stagingParent, { recursive: true });
+
+      try {
+        const stagedManifest = await splitPresetProject(stagedRoot, projectId, {
+          preset,
+          sourceType: manifest.source.type,
+          name: manifest.name,
+          version: manifest.version,
+          ...(manifest.source.presetName ? { sourcePresetName: manifest.source.presetName } : {}),
+          ...(manifest.source.stVersion ? { sourceStVersion: manifest.source.stVersion } : {}),
+        });
+        const nextManifest: ProjectManifest = {
+          ...stagedManifest,
+          id: manifest.id,
+          name: manifest.name,
+          version: manifest.version,
+          createdAt: manifest.createdAt,
+          updatedAt: new Date().toISOString(),
+          source: structuredClone(manifest.source),
+          targetPresetName: manifest.targetPresetName,
+        };
+        if (manifest.originalJsonSha256) {
+          nextManifest.originalJsonSha256 = manifest.originalJsonSha256;
+        } else {
+          delete nextManifest.originalJsonSha256;
+        }
+        await atomicWriteFile(join(stagedRoot, "project.json"), stringifyJson(nextManifest as unknown as JsonObject));
+        const stagedBuild = await buildPresetProject(stagedRoot);
+        if (!semanticEqual(preset, stagedBuild.preset)) {
+          throw new ApiError(500, "ROUND_TRIP_FAILED", "Applied preset did not survive semantic round trip", {
+            path: firstSemanticDifference(preset, stagedBuild.preset),
+          });
+        }
+
+        await mkdir(backupRoot, { recursive: true });
+        const originalPaths = new Set<string>();
+        const installedPaths = new Set<string>();
+        try {
+          for (const managedPath of MANAGED_SOURCE_PATHS) {
+            const currentPath = join(projectRoot, managedPath);
+            const stagedPath = join(stagedRoot, managedPath);
+            const backupPath = join(backupRoot, managedPath);
+            if (await pathExists(currentPath)) {
+              await mkdir(resolve(backupPath, ".."), { recursive: true });
+              await rename(currentPath, backupPath);
+              originalPaths.add(managedPath);
+            }
+            if (await pathExists(stagedPath)) {
+              await rename(stagedPath, currentPath);
+              installedPaths.add(managedPath);
+            }
+          }
+        } catch (error) {
+          for (const managedPath of [...MANAGED_SOURCE_PATHS].reverse()) {
+            const currentPath = join(projectRoot, managedPath);
+            const backupPath = join(backupRoot, managedPath);
+            if (installedPaths.has(managedPath)) {
+              await rm(currentPath, { recursive: true, force: true }).catch(() => undefined);
+            }
+            if (originalPaths.has(managedPath) && await pathExists(backupPath)) {
+              await rename(backupPath, currentPath).catch(() => undefined);
+            }
+          }
+          throw error;
+        }
+
+        const content = stringifyJson(stagedBuild.preset);
+        return {
+          path: SOURCE_JSON_PATH,
+          content,
+          size: Buffer.byteLength(content),
+          revision: stagedBuild.revision,
+          updatedAt: nextManifest.updatedAt,
+          role: "source-json",
+        };
+      } finally {
+        await Promise.all([
+          rm(stagedRoot, { recursive: true, force: true }).catch(() => undefined),
+          rm(backupRoot, { recursive: true, force: true }).catch(() => undefined),
+        ]);
+      }
+    });
+  }
+
   async readProjectFile(projectId: string, relativePath: string): Promise<ProjectFile> {
+    return this.withProjectLock(projectId, () => this.readProjectFileUnlocked(projectId, relativePath));
+  }
+
+  private async readProjectFileUnlocked(projectId: string, relativePath: string): Promise<ProjectFile> {
     const projectRoot = this.projectRoot(projectId);
     await this.readManifest(projectRoot);
     const path = await resolveInsideProject(projectRoot, relativePath);
@@ -313,6 +536,9 @@ export class ProjectStore {
     if (typeof input.content !== "string") throw new ApiError(400, "INVALID_INPUT", "content must be a string");
     if (Buffer.byteLength(input.content) > MAX_FILE_BYTES) {
       throw new ApiError(413, "FILE_TOO_LARGE", "Project file is too large to save");
+    }
+    if (relativePath.replaceAll("\\", "/") === SOURCE_JSON_PATH) {
+      throw new ApiError(400, "RESERVED_SOURCE_PATH", "Use the source-json endpoint to apply preset.json");
     }
     const projectRoot = this.projectRoot(projectId);
 
@@ -357,7 +583,7 @@ export class ProjectStore {
         manifest.updatedAt = new Date().toISOString();
         await atomicWriteFile(join(projectRoot, "project.json"), stringifyJson(manifest as unknown as JsonObject));
       }
-      return this.readProjectFile(projectId, relativePath);
+      return this.readProjectFileUnlocked(projectId, relativePath);
     });
   }
 
@@ -463,15 +689,17 @@ export class ProjectStore {
       throw new ApiError(400, "INVALID_OUTPUT_NAME", "Invalid output filename");
     }
     const projectRoot = this.projectRoot(projectId);
-    await this.readManifest(projectRoot);
-    const outputPath = await resolveInsideProject(projectRoot, `output/${filename}`);
-    try {
-      return { filename, content: await readFile(outputPath) };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new ApiError(404, "OUTPUT_NOT_FOUND", "Exported preset does not exist");
+    return this.withProjectLock(projectId, async () => {
+      await this.readManifest(projectRoot);
+      const outputPath = await resolveInsideProject(projectRoot, `output/${filename}`);
+      try {
+        return { filename, content: await readFile(outputPath) };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new ApiError(404, "OUTPUT_NOT_FOUND", "Exported preset does not exist");
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 }

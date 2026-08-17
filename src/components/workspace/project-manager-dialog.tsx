@@ -9,7 +9,9 @@ import {
   RadioTower,
   RefreshCw,
   Server,
+  Trash2,
   Upload,
+  XCircle,
 } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -48,6 +50,8 @@ interface ProjectManagerDialogProps {
   stCatalog: StPresetCatalog | null;
   isLoadingStPresets?: boolean;
   onSelect: (projectId: string) => void | Promise<void>;
+  onCloseProject: () => void | Promise<void>;
+  onDeleteProject: (project: ProjectChoice) => void;
   onCreate: (input: { name: string; version?: string }) => void | Promise<void>;
   onImport: (input: {
     name: string;
@@ -80,6 +84,8 @@ export function ProjectManagerDialog({
   stCatalog,
   isLoadingStPresets,
   onSelect,
+  onCloseProject,
+  onDeleteProject,
   onCreate,
   onImport,
   onImportArchive,
@@ -196,11 +202,8 @@ export function ProjectManagerDialog({
           <TabsContent value="projects" className="max-h-80 overflow-y-auto py-3">
             <div className="space-y-2">
               {projects.map((project) => (
-                <button
+                <div
                   key={project.id}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => runSafely(() => onSelect(project.id))}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-xl border p-3 text-left outline-none transition-colors hover:border-primary/30 focus-visible:ring-2 focus-visible:ring-ring/30",
                     project.id === activeProjectId
@@ -208,20 +211,50 @@ export function ProjectManagerDialog({
                       : "border-border bg-surface",
                   )}
                 >
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                    <FolderOpen className="size-4" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium">{project.name}</span>
-                      {project.version && <Badge variant="blue">{project.version}</Badge>}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => runSafely(() => onSelect(project.id))}
+                    className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+                  >
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <FolderOpen className="size-4" />
                     </span>
-                    <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                      {project.source ?? "工程"} · {project.updatedAt ? new Date(project.updatedAt).toLocaleString() : "尚未编辑"}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium">{project.name}</span>
+                        {project.version && <Badge variant="blue">{project.version}</Badge>}
+                      </span>
+                      <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                        {project.source ?? "工程"} · {project.updatedAt ? new Date(project.updatedAt).toLocaleString() : "尚未编辑"}
+                      </span>
                     </span>
-                  </span>
-                  {project.id === activeProjectId && <Check className="size-4 text-success" />}
-                </button>
+                    {project.id === activeProjectId && <Check className="size-4 text-success" />}
+                  </button>
+                  {project.id === activeProjectId ? (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={busy}
+                      onClick={() => runSafely(onCloseProject)}
+                      aria-label={`关闭工程 ${project.name}`}
+                      title="关闭工程"
+                    >
+                      <XCircle />
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-destructive hover:text-destructive"
+                    disabled={busy}
+                    onClick={() => onDeleteProject(project)}
+                    aria-label={`删除工程 ${project.name}`}
+                    title="永久删除服务器工程"
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
               ))}
               {!projects.length && (
                 <div className="py-10 text-center text-xs text-muted-foreground">

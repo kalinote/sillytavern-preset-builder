@@ -40,6 +40,9 @@ export interface ProjectFileEntry {
   revision: string | null;
   updatedAt: string | null;
   language?: string;
+  displayName?: string;
+  order?: number;
+  role?: "source-json";
 }
 
 export interface ProjectFile extends ProjectFileEntry {
@@ -178,6 +181,10 @@ export interface ProjectApi {
     projectId: string,
     options?: ProjectRequestOptions,
   ): Promise<Project>;
+  deleteProject(
+    projectId: string,
+    options?: ProjectRequestOptions,
+  ): Promise<void>;
   listProjectFiles(
     projectId: string,
     options?: ProjectRequestOptions,
@@ -284,6 +291,8 @@ export const PROJECT_API_ENDPOINTS = {
   importJson: `${API_ROOT}/import/json`,
   importArchive: `${API_ROOT}/import/archive`,
   project: (projectId: string) => `${API_ROOT}/${encodeProjectId(projectId)}`,
+  sourceJson: (projectId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/source-json`,
   files: (projectId: string) =>
     `${API_ROOT}/${encodeProjectId(projectId)}/files`,
   file: (projectId: string, path: string) =>
@@ -411,6 +420,13 @@ function parseFileEntry(value: unknown): ProjectFileEntry {
     revision: optionalString(value.revision),
     updatedAt: optionalString(value.updatedAt),
     ...(typeof value.language === "string" ? { language: value.language } : {}),
+    ...(typeof value.displayName === "string" && value.displayName
+      ? { displayName: value.displayName }
+      : {}),
+    ...(typeof value.order === "number" && Number.isFinite(value.order)
+      ? { order: value.order }
+      : {}),
+    ...(value.role === "source-json" ? { role: "source-json" as const } : {}),
   };
 }
 
@@ -788,6 +804,17 @@ export class ProjectApiClient implements ProjectApi {
     return parseProject(unwrap(payload, "project"));
   }
 
+  async deleteProject(
+    projectId: string,
+    options: ProjectRequestOptions = {},
+  ) {
+    await this.request(PROJECT_API_ENDPOINTS.project(projectId), {
+      method: "DELETE",
+      signal: options.signal,
+      headers: { Accept: "application/json" },
+    });
+  }
+
   async listProjectFiles(
     projectId: string,
     options: ProjectRequestOptions = {},
@@ -812,8 +839,11 @@ export class ProjectApiClient implements ProjectApi {
     path: string,
     options: ProjectRequestOptions = {},
   ) {
+    const sourceJson = path === "preset.json";
     const { payload, response } = await this.request(
-      PROJECT_API_ENDPOINTS.file(projectId, path),
+      sourceJson
+        ? PROJECT_API_ENDPOINTS.sourceJson(projectId)
+        : PROJECT_API_ENDPOINTS.file(projectId, path),
       {
         method: "GET",
         signal: options.signal,
@@ -832,8 +862,14 @@ export class ProjectApiClient implements ProjectApi {
     input: UpdateProjectFileInput,
     options: ProjectRequestOptions = {},
   ) {
+    const sourceJson = path === "preset.json";
+    if (sourceJson && !input.revision) {
+      throw new TypeError("Complete preset JSON requires a source revision");
+    }
     const { payload, response } = await this.request(
-      PROJECT_API_ENDPOINTS.file(projectId, path),
+      sourceJson
+        ? PROJECT_API_ENDPOINTS.sourceJson(projectId)
+        : PROJECT_API_ENDPOINTS.file(projectId, path),
       {
         method: "PUT",
         signal: options.signal,

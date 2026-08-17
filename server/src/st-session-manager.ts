@@ -274,6 +274,12 @@ export class StSessionManager {
     }
   }
 
+  invalidateProjectPreviews(projectId: string): void {
+    for (const [previewHash, preview] of this.previews) {
+      if (preview.projectId === projectId) this.previews.delete(previewHash);
+    }
+  }
+
   async listPresets(token: string | undefined): Promise<StPresetCatalog> {
     return this.withUsableSession(token, (record) => record.adapter.listPresets());
   }
