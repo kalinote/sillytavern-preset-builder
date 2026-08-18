@@ -33,6 +33,9 @@ pnpm --dir server start
 - `PRESET_STUDIO_ZIP_MAX_ENTRIES`：ZIP 文件和目录条目上限，默认 `10000`。
 - `PRESET_STUDIO_ALLOWED_ORIGINS`：允许直接跨源访问 Studio API 的 HTTP(S) Origin，多个值用英文逗号分隔；默认空，只允许同源浏览器请求。
 - `PRESET_STUDIO_EXPOSE_WORKSPACE_PATH`：设为 `true` 时才在 `/api/health` 返回工作区绝对路径，默认 `false`。
+- `PRESET_STUDIO_PREVIEW_RUNTIME_ENABLED`：服务级动态预览总开关，默认 `true`；设为 `false`、`0`、`no` 或 `off` 后，配置的 Preview Host 仍作为隔离域保留，但所有路径统一返回 `404`，项目级开关保持不变，静态预览仍可用。兼容计划早期使用的别名 `PREVIEW_RUNTIME_ENABLED`，前者优先。
+- `PRESET_STUDIO_PREVIEW_ORIGIN`：独立 JavaScript Preview Host 的公开 Origin；本机启动脚本默认 `http://localhost:<PORT>`。必须与 Studio UI 不同源。
+- `PRESET_STUDIO_PREVIEW_PARENT_ORIGINS`：允许嵌入 Preview Host 并完成消息握手的 Studio Origin，逗号分隔。反向代理或 LAN 部署必须显式配置实际 UI Origin。
 
 ### SillyTavern 直连
 
@@ -65,6 +68,22 @@ pnpm --dir server start
 ST 会话 Cookie 是 `SameSite=Strict`，前端请求使用 `credentials: "same-origin"`；因此使用 ST 连接能力时，UI 与 `/api` 必须同源。开发环境通过 Vite `/api` proxy 满足这一点；生产分离托管时必须把 `/api` 反向代理到与 UI 相同的 Origin。CORS 白名单不能替代同源反代，也不能用于跨站携带 ST 会话。
 
 `PRESET_STUDIO_ALLOWED_ORIGINS` 控制无会话 API 的浏览器跨源边界；`PRESET_STUDIO_ST_ALLOWED_ORIGINS` 控制 Studio Node 能连接哪些 ST。两者用途不同，不能互相替代。Origin 校验也不等同于用户认证。
+
+### JavaScript Preview Host
+
+同一个 Node 监听器按请求 `Host` 区分 Studio 与 Preview Host。匹配 `PRESET_STUDIO_PREVIEW_ORIGIN` 的请求只允许 `GET/HEAD /preview-runtime`、固定版本的 `/preview-assets/*`，以及 SPreset 引导所需的固定兼容入口 `/version`、`/script.js`、`/scripts/openai.js`；所有 `/api/*` 和其他路径均返回 `404`。Preview 响应不发送 `X-Frame-Options: SAMEORIGIN`，而使用 `frame-ancestors` 限制为 `PRESET_STUDIO_PREVIEW_PARENT_ORIGINS`。固定资源包括 jQuery、Lodash、js-yaml、Showdown、Toastr、Zod 和用于模板求值的 EJS `3.1.10`；两个模块入口只提供最小 ST 1.18 模块外形，不提供真实生成能力。
+
+服务级开关关闭时也必须保留 `PRESET_STUDIO_PREVIEW_ORIGIN` 的 Host 路由：该 Host 的运行时、固定资源、`/api/*` 和任意其他路径全部返回 `404`，绝不能回落到 Studio 静态站点或 API。恢复开关不修改项目内的 `manifest.preview.javascriptEnabled`。反向代理应始终把两个域名的原始 `Host` 转发给同一 Node 服务。
+
+Prompt/EJS 使用一次性 `sandbox="allow-scripts"` 子 frame 求值，不授予 `allow-same-origin`；其变量写入经过 Preview Host 的结构化消息回到内存 Preview State。消息链路顺序为“正则替换 → EJS → HTML 消息 frame”，Prompt `content.md` 则把 EJS 结果作为转义文本显示。EJS include 和 Prompt Template 扩展会返回明确的 capability 诊断，不会退回 Studio 或 Node 中执行。
+
+Inspector 的“模拟生成管线”通过 `generation:simulate` 请求在 Preview Host 内近似组装 Chat Completion 消息，触发组合前后、prompt ready、`GENERATE_AFTER_DATA` 和发送设置事件，并把生成期 EJS 及监听器修改后的消息/设置快照经 `generation-status` 返回。它不访问模型 API、不写回聊天；为便于检查发送前插件，Studio 的 dry-run 会额外预演 `CHAT_COMPLETION_SETTINGS_READY`，因此监听器自身的网络或存储副作用仍会真实发生。
+
+项目脚本小于 512 KiB 时直接发送；达到阈值后按约 256 KiB 源码片段编码，每块通过可转移 `ArrayBuffer` 发送，并等待 Preview Host ack 后再继续。Host 限制单块不超过 1 MiB、总块数不超过 128、单脚本不超过 16 MiB，并在 commit 前验证顺序、总字节数、UTF-8 和 SHA-256。停止、重启或传输失败会取消未完成传输。
+
+Inspector 的“清空存储”通过同一 MessageChannel 请求 Preview Host 先销毁运行 frame，再清理该 Origin 的 localStorage、sessionStorage、IndexedDB 和 Cache Storage。此操作需要用户确认，不会自动执行，也不能撤销已完成的外部请求。
+
+本机默认通过 `http://127.0.0.1:3001` 打开 Studio，并把 `http://localhost:3001` 留给 Preview Host。若从 LAN、HTTPS 域名或反向代理访问，`localhost` 会指向浏览器所在设备，必须把 Preview Origin 配成可从该浏览器访问的独立子域/端口，并把实际 Studio Origin 加入 parent 列表。不要把 Preview Origin 加入 `PRESET_STUDIO_ALLOWED_ORIGINS`，也不要给它代理 `/api`。
 
 ## REST API
 
@@ -269,7 +288,7 @@ pnpm --dir server test
 
 ## Docker 健康检查与工作区权限
 
-镜像和 Compose 使用 `/api/health`。默认响应只返回 `{ "ok":true }`。仅当 `PRESET_STUDIO_EXPOSE_WORKSPACE_PATH=true` 时才额外返回工作区绝对路径。
+镜像和 Compose 使用 `/api/health`。响应包含 `{ "ok":true, "previewRuntime":{...} }`，其中 `previewRuntime` 用于告诉前端独立预览 Host 是否启用及其 Origin。仅当 `PRESET_STUDIO_EXPOSE_WORKSPACE_PATH=true` 时才额外返回工作区绝对路径。
 
 容器使用非 root UID/GID，Compose 默认 `1000:1000`，移除 Linux capabilities 并启用 `no-new-privileges`。bind mount 目录必须允许该 UID/GID 读写；若宿主机使用其他所有者，可在 `.env` 配置 `PRESET_STUDIO_UID`、`PRESET_STUDIO_GID`。工程写入容器 `/app/workspace-data`，由 `PRESET_STUDIO_WORKSPACE_HOST` 映射到宿主机。
 

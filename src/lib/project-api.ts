@@ -27,6 +27,48 @@ export interface Project extends ProjectSummary {
   targetPresetName?: string | null;
   originalHash?: string | null;
   buildRulesVersion?: string | number;
+  preview: ProjectPreviewSettings;
+}
+
+export interface ProjectPreviewSettings {
+  javascriptEnabled: boolean;
+}
+
+export interface PreviewRuntimeScript {
+  uid: string;
+  id: string;
+  name: string;
+  index: number;
+  enabled: boolean;
+  executable: boolean;
+  path: string;
+  byteLength: number;
+  contentHash: string;
+}
+
+export interface PreviewRuntimeRegex {
+  uid: string;
+  id: string;
+  name: string;
+  index: number;
+  disabled: boolean;
+  runOnEdit: boolean;
+  findPath: string;
+  replacePath: string;
+  metaPath: string;
+}
+
+export interface PreviewRuntimeManifest {
+  projectId: string;
+  projectUpdatedAt: string;
+  javascriptEnabled: boolean;
+  scripts: PreviewRuntimeScript[];
+  regexScripts: PreviewRuntimeRegex[];
+  totalEnabledScriptBytes: number;
+  compatibility: {
+    spresetPresent: boolean;
+    promptTemplateHints: string[];
+  };
 }
 
 export type ProjectFileKind = "file" | "directory";
@@ -182,23 +224,27 @@ export type ProjectExportResult =
 export interface CreateProjectInput {
   name: string;
   version?: string | null;
+  preview?: ProjectPreviewSettings;
 }
 
 export interface CreateProjectFromStInput {
   presetName: string;
   name?: string;
   version?: string | null;
+  preview?: ProjectPreviewSettings;
 }
 
 export interface ImportProjectInput {
   name?: string;
   version?: string | null;
+  preview?: ProjectPreviewSettings;
 }
 
 export interface ImportProjectArchiveInput {
   /** Optional overrides for the manifest stored inside the package. */
   name?: string;
   version?: string | null;
+  javascriptPolicy?: "preserve" | "force-disabled" | "force-enabled";
 }
 
 export interface ProjectArchiveImportMetadata {
@@ -229,6 +275,7 @@ export interface UpdateProjectInput {
   name?: string;
   version?: string;
   targetPresetName?: string;
+  preview?: ProjectPreviewSettings;
 }
 
 export interface BuildProjectInput {
@@ -268,6 +315,10 @@ export interface ProjectApi {
     projectId: string,
     options?: ProjectRequestOptions,
   ): Promise<Project>;
+  getPreviewRuntimeManifest(
+    projectId: string,
+    options?: ProjectRequestOptions,
+  ): Promise<PreviewRuntimeManifest>;
   updateProject(
     projectId: string,
     input: UpdateProjectInput,
@@ -403,6 +454,8 @@ export const PROJECT_API_ENDPOINTS = {
   importJson: `${API_ROOT}/import/json`,
   importArchive: `${API_ROOT}/import/archive`,
   project: (projectId: string) => `${API_ROOT}/${encodeProjectId(projectId)}`,
+  previewRuntimeManifest: (projectId: string) =>
+    `${API_ROOT}/${encodeProjectId(projectId)}/preview/runtime-manifest`,
   sourceJson: (projectId: string) =>
     `${API_ROOT}/${encodeProjectId(projectId)}/source-json`,
   files: (projectId: string) =>
@@ -466,6 +519,7 @@ function parseProject(value: unknown): Project {
   const schemaVersion = value.schemaVersion;
   const buildRulesVersion = value.buildRulesVersion;
   const sourceRecord = isRecord(value.source) ? value.source : null;
+  const previewRecord = isRecord(value.preview) ? value.preview : null;
   const source =
     typeof value.source === "string"
       ? value.source
@@ -494,6 +548,9 @@ function parseProject(value: unknown): Project {
     typeof buildRulesVersion === "number"
       ? { buildRulesVersion }
       : {}),
+    preview: {
+      javascriptEnabled: previewRecord?.javascriptEnabled === true,
+    },
   };
 }
 
@@ -506,6 +563,55 @@ function parseProjectSummary(value: unknown): ProjectSummary {
     source: project.source,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
+  };
+}
+
+function parsePreviewRuntimeManifest(value: unknown): PreviewRuntimeManifest {
+  if (!isRecord(value) || !Array.isArray(value.scripts) || !Array.isArray(value.regexScripts)) {
+    throw new TypeError("Preview runtime manifest response has an unsupported structure");
+  }
+  const scripts = value.scripts.map((item, index): PreviewRuntimeScript => {
+    if (!isRecord(item)) throw new TypeError(`preview scripts[${index}] must be an object`);
+    return {
+      uid: requiredString(item, "uid", `preview scripts[${index}]`),
+      id: requiredString(item, "id", `preview scripts[${index}]`),
+      name: requiredString(item, "name", `preview scripts[${index}]`),
+      index: optionalNumber(item.index) ?? index,
+      enabled: item.enabled === true,
+      executable: item.executable === true,
+      path: requiredString(item, "path", `preview scripts[${index}]`),
+      byteLength: optionalNumber(item.byteLength) ?? 0,
+      contentHash: requiredString(item, "contentHash", `preview scripts[${index}]`),
+    };
+  });
+  const regexScripts = value.regexScripts.map((item, index): PreviewRuntimeRegex => {
+    if (!isRecord(item)) throw new TypeError(`preview regexScripts[${index}] must be an object`);
+    return {
+      uid: requiredString(item, "uid", `preview regexScripts[${index}]`),
+      id: requiredString(item, "id", `preview regexScripts[${index}]`),
+      name: requiredString(item, "name", `preview regexScripts[${index}]`),
+      index: optionalNumber(item.index) ?? index,
+      disabled: item.disabled === true,
+      runOnEdit: item.runOnEdit === true,
+      findPath: requiredString(item, "findPath", `preview regexScripts[${index}]`),
+      replacePath: requiredString(item, "replacePath", `preview regexScripts[${index}]`),
+      metaPath: requiredString(item, "metaPath", `preview regexScripts[${index}]`),
+    };
+  });
+  const compatibility = isRecord(value.compatibility) ? value.compatibility : {};
+  return {
+    projectId: requiredString(value, "projectId", "preview manifest"),
+    projectUpdatedAt: requiredString(value, "projectUpdatedAt", "preview manifest"),
+    javascriptEnabled: value.javascriptEnabled === true,
+    scripts,
+    regexScripts,
+    totalEnabledScriptBytes: optionalNumber(value.totalEnabledScriptBytes) ?? 0,
+    compatibility: {
+      spresetPresent: compatibility.spresetPresent === true,
+      promptTemplateHints: Array.isArray(compatibility.promptTemplateHints)
+        ? compatibility.promptTemplateHints.filter((item): item is string => typeof item === "string")
+        : [],
+    },
   };
 }
 
@@ -1006,6 +1112,7 @@ export class ProjectApiClient implements ProjectApi {
         preset,
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.version !== undefined ? { version: input.version } : {}),
+        ...(input.preview === undefined ? {} : { preview: input.preview }),
       }),
     });
     return parseProject(unwrap(payload, "project"));
@@ -1021,6 +1128,9 @@ export class ProjectApiClient implements ProjectApi {
     if (input.name !== undefined) form.append("name", input.name);
     if (input.version !== undefined && input.version !== null) {
       form.append("version", input.version);
+    }
+    if (input.javascriptPolicy !== undefined) {
+      form.append("javascriptPolicy", input.javascriptPolicy);
     }
 
     const { payload } = await this.request(
@@ -1048,6 +1158,21 @@ export class ProjectApiClient implements ProjectApi {
       },
     );
     return parseProject(unwrap(payload, "project"));
+  }
+
+  async getPreviewRuntimeManifest(
+    projectId: string,
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(
+      PROJECT_API_ENDPOINTS.previewRuntimeManifest(projectId),
+      {
+        method: "GET",
+        signal: options.signal,
+        headers: { Accept: "application/json" },
+      },
+    );
+    return parsePreviewRuntimeManifest(unwrap(payload, "manifest"));
   }
 
   async updateProject(

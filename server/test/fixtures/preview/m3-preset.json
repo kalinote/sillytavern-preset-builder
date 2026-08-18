@@ -1,0 +1,128 @@
+{
+  "temperature": 1,
+  "prompts": [
+    {
+      "identifier": "main",
+      "name": "Main",
+      "role": "system",
+      "content": "M3 preview fixture for <%= userName %> and <%= charName %>. Phase: <%= phase %>."
+    }
+  ],
+  "prompt_order": [
+    {
+      "character_id": 100001,
+      "order": [
+        {
+          "identifier": "main",
+          "enabled": true
+        }
+      ]
+    }
+  ],
+  "extensions": {
+    "regex_scripts": [
+      {
+        "id": "regex-card",
+        "scriptName": "Card renderer",
+        "disabled": false,
+        "runOnEdit": true,
+        "findRegex": "/<card>([\\s\\S]*?)<\\/card>/g",
+        "replaceString": "```html\n<!doctype html><html><head><title>Card</title></head><body><button id=card-button onclick=\"document.body.dataset.clicked='yes'\">$1</button><output id=script-order></output><script>document.querySelector('#script-order').textContent = getVariables().order.join('>'); console.log('message-frame', $('#card-button').text(), getChatMessages('0-{{lastMessageId}}').length); try { triggerSlash('/echo preview'); } catch (error) { console.warn('unsupported-capability', error.name, error.capability); }<\/script></body></html>\n```",
+        "placement": [
+          2
+        ],
+        "minDepth": null,
+        "maxDepth": null
+      },
+      {
+        "id": "regex-after",
+        "scriptName": "Ordered suffix",
+        "disabled": false,
+        "runOnEdit": true,
+        "findRegex": "/<\\/body>/g",
+        "replaceString": "<p id=ordered-suffix>ordered</p></body>",
+        "placement": [
+          2
+        ],
+        "minDepth": null,
+        "maxDepth": null
+      },
+      {
+        "id": "regex-ejs",
+        "scriptName": "Prompt Template EJS-1",
+        "disabled": false,
+        "runOnEdit": true,
+        "findRegex": "/<ejs-card>([\\s\\S]*?)<\\/ejs-card>/g",
+        "replaceString": "```html\n<!doctype html><html><head><title>EJS</title></head><body><div id=escaped><%= '<strong>escaped</strong>' %></div><div id=raw><%- '<em>raw</em>' %></div><%# hidden comment %><% setMessageVar('score', (getMessageVar('score', { defaults: 0 }) || 0) + 1); %><output id=context><%= userName %>|<%= charName %>|<%= role %>|<%= mesId %>|<%= getMessageVar('score') %>|<%= await Promise.resolve('async-ok') %></output><output id=isolation><%= (() => { try { return window.parent.document ? 'leak' : 'none'; } catch { return 'blocked'; } })() %></output><ul><% for (const value of [1, 2]) { %><li><%= value %></li><% } %></ul><p id=capture>$1</p><script>document.body.dataset.templateApi = typeof window.parent.EjsTemplate?.evalTemplate; console.log('ejs-message-frame', document.querySelector('#context').textContent);<\/script></body></html>\n```",
+        "placement": [
+          2
+        ],
+        "minDepth": null,
+        "maxDepth": null
+      },
+      {
+        "id": "regex-ejs-include",
+        "scriptName": "Unsupported EJS include",
+        "disabled": true,
+        "runOnEdit": true,
+        "findRegex": "/<include-test\\s*\\/>/g",
+        "replaceString": "<main><%- include('fixture.ejs') %></main>",
+        "placement": [
+          2
+        ],
+        "minDepth": null,
+        "maxDepth": null
+      },
+      {
+        "id": "regex-ejs-error",
+        "scriptName": "EJS error location",
+        "disabled": true,
+        "runOnEdit": true,
+        "findRegex": "/<error-test\\s*\\/>/g",
+        "replaceString": "<main>\n<p>before</p>\n<%= missingPreviewFunction() %>\n</main>",
+        "placement": [
+          2
+        ],
+        "minDepth": null,
+        "maxDepth": null
+      }
+    ],
+    "tavern_helper": {
+      "variables": {},
+      "scripts": [
+        {
+          "type": "script",
+          "id": "script-first",
+          "name": "First enabled script",
+          "enabled": true,
+          "content": "const initial = getVariables(); initial.order = [...(initial.order || []), 'first']; replaceVariables(initial); console.log('project-first', getScriptId(), $.fn.jquery, _.VERSION, typeof YAML.load, typeof showdown.Converter, typeof z.string, typeof EjsTemplate.evalTemplate); eventOn(tavern_events.APP_READY, () => console.log('app-ready-first', getVariables().order.join('>')));",
+          "data": {}
+        },
+        {
+          "type": "script",
+          "id": "script-error",
+          "name": "Enabled failing script",
+          "enabled": true,
+          "content": "console.log('project-error-before-throw'); throw new Error('EXPECTED_FIXTURE_ERROR');",
+          "data": {}
+        },
+        {
+          "type": "script",
+          "id": "script-disabled",
+          "name": "Disabled script",
+          "enabled": false,
+          "content": "console.error('DISABLED_SCRIPT_MUST_NOT_RUN');",
+          "data": {}
+        },
+        {
+          "type": "script",
+          "id": "script-second",
+          "name": "Second enabled script",
+          "enabled": true,
+          "content": "const current = getVariables(); current.order = [...(current.order || []), 'second']; replaceVariables(current); await createChatMessages([{ role: 'assistant', message: 'created-by-project-script' }], { insert_before: 0 }); eventOn(tavern_events.APP_READY, () => console.log('app-ready-second', getVariables().order.join('>'), getChatMessages('0-{{lastMessageId}}').length)); console.log('project-second', getScriptName());",
+          "data": {}
+        }
+      ]
+    }
+  }
+}

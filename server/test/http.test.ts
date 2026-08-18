@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { createApiServer } from "../src/http.js";
 
@@ -13,6 +14,215 @@ function minimalPreset() {
     extensions: { unknown: { keep: true } },
   };
 }
+
+async function hostRequest(
+  port: number,
+  host: string,
+  path: string,
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ hostname: "127.0.0.1", port, path, headers: { Host: host } }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode ?? 0,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+test("preview host serves only the isolated runtime and never exposes project APIs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-preview-host-"));
+  const { server } = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    previewOrigin: "http://preview.test",
+    previewParentOrigins: ["http://studio.test"],
+    // The preview origin remains forbidden even if a deployer accidentally
+    // also adds it to the ordinary API allowlist.
+    allowedOrigins: ["http://preview.test"],
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const runtime = await hostRequest(address.port, "preview.test", "/preview-runtime");
+    assert.equal(runtime.status, 200);
+    assert.match(runtime.body, /preview:connect/);
+    assert.match(runtime.body, /jquery-3\.7\.1\.min\.js/);
+    assert.equal(runtime.headers["x-frame-options"], undefined);
+    assert.equal(runtime.headers["content-security-policy"], "frame-ancestors http://studio.test");
+
+    const previewAsset = await hostRequest(address.port, "preview.test", "/preview-assets/jquery-3.7.1.min.js");
+    assert.equal(previewAsset.status, 200);
+    assert.match(String(previewAsset.headers["content-type"]), /text\/javascript/);
+    assert.match(String(previewAsset.headers["cache-control"]), /immutable/);
+    assert.match(previewAsset.body, /jQuery/);
+
+    const ejsAsset = await hostRequest(address.port, "preview.test", "/preview-assets/ejs-3.1.10.min.js");
+    assert.equal(ejsAsset.status, 200);
+    assert.match(String(ejsAsset.headers["content-type"]), /text\/javascript/);
+    assert.match(ejsAsset.body, /g\.ejs=f/);
+
+    const compatibilityVersion = await hostRequest(address.port, "preview.test", "/version");
+    assert.equal(compatibilityVersion.status, 200);
+    assert.deepEqual(JSON.parse(compatibilityVersion.body), {
+      pkgVersion: "1.18.0",
+      previewRuntime: true,
+    });
+
+    const openAiModule = await hostRequest(address.port, "preview.test", "/scripts/openai.js");
+    assert.equal(openAiModule.status, 200);
+    assert.match(String(openAiModule.headers["content-type"]), /text\/javascript/);
+    assert.match(openAiModule.body, /export const promptManager/);
+    const versionModule = await hostRequest(address.port, "preview.test", "/script.js");
+    assert.equal(versionModule.status, 200);
+    assert.match(versionModule.body, /SillyTavern 1\.18\.0/);
+
+    const blockedApi = await hostRequest(address.port, "preview.test", "/api/health");
+    assert.equal(blockedApi.status, 404);
+    const studioRuntime = await hostRequest(address.port, `127.0.0.1:${address.port}`, "/preview-runtime");
+    assert.equal(studioRuntime.status, 404);
+
+    const health = await hostRequest(address.port, `127.0.0.1:${address.port}`, "/api/health");
+    assert.equal(health.status, 200);
+    assert.deepEqual(JSON.parse(health.body).previewRuntime, {
+      enabled: true,
+      origin: "http://preview.test",
+    });
+    const crossOriginApi = await fetch(`http://127.0.0.1:${address.port}/api/health`, {
+      headers: { Origin: "http://preview.test" },
+    });
+    assert.equal(crossOriginApi.status, 403);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("service feature flag can disable the preview host without changing Studio health", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-preview-disabled-"));
+  const { server } = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    previewOrigin: "http://preview.test",
+    previewRuntimeEnabled: false,
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const health = await hostRequest(address.port, "studio.test", "/api/health");
+    assert.equal(health.status, 200);
+    assert.deepEqual(JSON.parse(health.body).previewRuntime, { enabled: false });
+
+    const runtime = await hostRequest(address.port, "preview.test", "/preview-runtime");
+    assert.equal(runtime.status, 404);
+    const asset = await hostRequest(
+      address.port,
+      "preview.test",
+      "/preview-assets/ejs-3.1.10.min.js",
+    );
+    assert.equal(asset.status, 404);
+    assert.equal((await hostRequest(address.port, "preview.test", "/version")).status, 404);
+    assert.equal((await hostRequest(address.port, "preview.test", "/scripts/openai.js")).status, 404);
+    assert.equal((await hostRequest(address.port, "preview.test", "/script.js")).status, 404);
+    const previewApi = await hostRequest(address.port, "preview.test", "/api/health");
+    assert.equal(previewApi.status, 404);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preview rollout can disable and restore the reserved host without changing project settings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-preview-rollout-"));
+  const previewOrigin = "http://preview.test";
+  let projectId = "";
+
+  const first = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    previewOrigin,
+    previewRuntimeEnabled: true,
+    previewParentOrigins: ["http://studio.test"],
+  });
+  await new Promise<void>((resolve) => first.server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = first.server.address();
+    assert(address && typeof address === "object");
+    const importedResponse = await fetch(`http://127.0.0.1:${address.port}/api/projects/import/json`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Preview rollout fixture",
+        preview: { javascriptEnabled: true },
+        preset: minimalPreset(),
+      }),
+    });
+    assert.equal(importedResponse.status, 201);
+    const imported = await importedResponse.json() as {
+      project: { id: string; preview: { javascriptEnabled: boolean } };
+    };
+    projectId = imported.project.id;
+    assert.equal(imported.project.preview.javascriptEnabled, true);
+    const runtime = await hostRequest(address.port, "preview.test", "/preview-runtime");
+    assert.equal(runtime.status, 200);
+  } finally {
+    await new Promise<void>((resolve) => first.server.close(() => resolve()));
+    first.stSessions.close();
+  }
+
+  const disabled = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    previewOrigin,
+    previewRuntimeEnabled: false,
+    previewParentOrigins: ["http://studio.test"],
+  });
+  await new Promise<void>((resolve) => disabled.server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = disabled.server.address();
+    assert(address && typeof address === "object");
+    const health = await hostRequest(address.port, "studio.test", "/api/health");
+    assert.deepEqual(JSON.parse(health.body).previewRuntime, { enabled: false });
+    assert.equal((await hostRequest(address.port, "preview.test", "/api/health")).status, 404);
+    assert.equal((await hostRequest(address.port, "preview.test", "/preview-runtime")).status, 404);
+    const project = await hostRequest(address.port, "studio.test", `/api/projects/${projectId}`);
+    assert.equal(project.status, 200);
+    assert.equal(JSON.parse(project.body).project.preview.javascriptEnabled, true);
+  } finally {
+    await new Promise<void>((resolve) => disabled.server.close(() => resolve()));
+    disabled.stSessions.close();
+  }
+
+  const restored = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    previewOrigin,
+    previewRuntimeEnabled: true,
+    previewParentOrigins: ["http://studio.test"],
+  });
+  await new Promise<void>((resolve) => restored.server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = restored.server.address();
+    assert(address && typeof address === "object");
+    const health = await hostRequest(address.port, "studio.test", "/api/health");
+    assert.deepEqual(JSON.parse(health.body).previewRuntime, { enabled: true, origin: previewOrigin });
+    assert.equal((await hostRequest(address.port, "preview.test", "/preview-runtime")).status, 200);
+    assert.equal((await hostRequest(address.port, "preview.test", "/api/health")).status, 404);
+    const project = await hostRequest(address.port, "studio.test", `/api/projects/${projectId}`);
+    assert.equal(JSON.parse(project.body).project.preview.javascriptEnabled, true);
+  } finally {
+    await new Promise<void>((resolve) => restored.server.close(() => resolve()));
+    restored.stSessions.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("HTTP project lifecycle supports JSON import, file access, build, and export", async () => {
   const root = await mkdtemp(join(tmpdir(), "preset-studio-http-"));
@@ -33,8 +243,23 @@ test("HTTP project lifecycle supports JSON import, file access, build, and expor
       body: JSON.stringify({ name: "API fixture", version: "1", preset: minimalPreset() }),
     });
     assert.equal(importedResponse.status, 201);
-    const imported = await importedResponse.json() as { project: { id: string } };
+    const imported = await importedResponse.json() as {
+      project: { id: string; preview: { javascriptEnabled: boolean } };
+    };
     assert.match(imported.project.id, /^project-/);
+    assert.equal(imported.project.preview.javascriptEnabled, true);
+
+    const runtimeManifestResponse = await fetch(
+      `${base}/api/projects/${imported.project.id}/preview/runtime-manifest`,
+    );
+    assert.equal(runtimeManifestResponse.status, 200);
+    const runtimeManifest = await runtimeManifestResponse.json() as {
+      manifest: { projectId: string; javascriptEnabled: boolean; scripts: unknown[]; regexScripts: unknown[] };
+    };
+    assert.equal(runtimeManifest.manifest.projectId, imported.project.id);
+    assert.equal(runtimeManifest.manifest.javascriptEnabled, true);
+    assert.deepEqual(runtimeManifest.manifest.scripts, []);
+    assert.deepEqual(runtimeManifest.manifest.regexScripts, []);
 
     const filesResponse = await fetch(`${base}/api/projects/${imported.project.id}/files`);
     assert.equal(filesResponse.status, 200);
@@ -109,18 +334,20 @@ test("HTTP project lifecycle supports JSON import, file access, build, and expor
     form.append("file", new Blob([archiveBytes], { type: "application/zip" }), "project.zip");
     form.append("name", "HTTP archive copy");
     form.append("version", "v2");
+    form.append("javascriptPolicy", "force-disabled");
     const archiveImportResponse = await fetch(`${base}/api/projects/import/archive`, {
       method: "POST",
       body: form,
     });
     assert.equal(archiveImportResponse.status, 201);
     const archiveImport = await archiveImportResponse.json() as {
-      project: { id: string; name: string; version: string };
+      project: { id: string; name: string; version: string; preview: { javascriptEnabled: boolean } };
       import: { originalProjectId: string; idRegenerated: boolean };
     };
     assert.notEqual(archiveImport.project.id, imported.project.id);
     assert.equal(archiveImport.project.name, "HTTP archive copy");
     assert.equal(archiveImport.project.version, "v2");
+    assert.equal(archiveImport.project.preview.javascriptEnabled, false);
     assert.equal(archiveImport.import.originalProjectId, imported.project.id);
     assert.equal(archiveImport.import.idRegenerated, true);
 

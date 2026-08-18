@@ -9,11 +9,31 @@ const bodyLimitBytes = Number.isFinite(configuredLimit) && configuredLimit > 0
   ? Math.floor(configuredLimit * 1024 * 1024)
   : 64 * 1024 * 1024;
 
-const { server, store, stSessions } = createApiServer({ bodyLimitBytes });
+const previewRuntimeFlag = (process.env.PRESET_STUDIO_PREVIEW_RUNTIME_ENABLED
+  ?? process.env.PREVIEW_RUNTIME_ENABLED
+  ?? "true")
+  .trim()
+  .toLowerCase();
+const previewRuntimeEnabled = !["0", "false", "no", "off"].includes(previewRuntimeFlag);
+const previewOrigin = process.env.PRESET_STUDIO_PREVIEW_ORIGIN ?? `http://localhost:${port}`;
+const previewParentOrigins = (process.env.PRESET_STUDIO_PREVIEW_PARENT_ORIGINS
+  ?? `http://${host}:${port},http://localhost:${port},http://127.0.0.1:${port},http://localhost:4173,http://127.0.0.1:4173`)
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const { server, store, stSessions } = createApiServer({
+  bodyLimitBytes,
+  previewOrigin,
+  previewRuntimeEnabled,
+  previewParentOrigins,
+});
 await store.initialize();
 
 server.listen(port, host, () => {
   console.log(`Preset Studio server listening on http://${host}:${port}`);
+  console.log(!previewRuntimeEnabled
+    ? "JavaScript preview host: disabled by service feature flag"
+    : `JavaScript preview host: ${previewOrigin}/preview-runtime`);
   console.log(`Workspace: ${store.workspaceRoot}`);
 });
 

@@ -43,9 +43,11 @@ import { useProjectWorkspace } from "./hooks/use-project-workspace";
 import { useStConnection } from "./hooks/use-st-connection";
 import { runSafely } from "./lib/async";
 import type { ProjectExportResult, StructureMutation } from "./lib/project-api";
+import { useProjectPreviewRuntime } from "./preview/use-project-preview-runtime";
 
 export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
+  const [previewOrigin, setPreviewOrigin] = useState<string>();
   const st = useStConnection({
     enabled: backendOnline,
   });
@@ -58,6 +60,7 @@ export default function App() {
       }
     },
   });
+  const updateProjectSettings = workspace.updateProjectSettings;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [connectionDialogOpen, setConnectionDialogOpen] = useState(false);
   const [pushDialogOpen, setPushDialogOpen] = useState(false);
@@ -91,11 +94,20 @@ export default function App() {
         headers: { Accept: "application/json" },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const health = await response.json() as {
+        previewRuntime?: { enabled?: boolean; origin?: string };
+      };
+      setPreviewOrigin(
+        health.previewRuntime?.enabled === true && typeof health.previewRuntime.origin === "string"
+          ? health.previewRuntime.origin
+          : undefined,
+      );
       setBackendOnline(true);
       clearWorkspaceError();
       return true;
     } catch {
       setBackendOnline(false);
+      setPreviewOrigin(undefined);
       return false;
     }
   }, [clearWorkspaceError]);
@@ -137,6 +149,15 @@ export default function App() {
         : workspace.saveState === "error"
           ? "error"
           : "saved";
+  const previewRuntime = useProjectPreviewRuntime({
+    project: workspace.project,
+    structure: workspace.structure,
+    activeFile: workspace.activeFile,
+    content: workspace.content,
+    saveState: mappedSaveState,
+    previewOrigin,
+  });
+  const stopPreviewRuntime = previewRuntime.stop;
 
   const runOperation = useCallback(
     async (operation: () => Promise<void>, successMessage?: string) => {
@@ -156,6 +177,14 @@ export default function App() {
     },
     [clearWorkspaceError],
   );
+
+  const handleJavascriptEnabledChange = useCallback((enabled: boolean) => {
+    if (!enabled) void stopPreviewRuntime(true);
+    void runOperation(
+      () => updateProjectSettings({ preview: { javascriptEnabled: enabled } }).then(() => undefined),
+      enabled ? "已允许动态 JavaScript 预览" : "已关闭动态 JavaScript 预览",
+    );
+  }, [runOperation, stopPreviewRuntime, updateProjectSettings]);
 
   const requestWorkspaceAction = useCallback(
     (action: () => void | Promise<void>, actionLabel = "继续") => {
@@ -438,7 +467,7 @@ export default function App() {
                 onMutateStructure={handleStructureMutation}
               />
 
-              {inspectorVisible && (
+              {wideInspectorLayout && inspectorVisible && (
                 <ResizableSidebar
                   id="desktop-workspace-inspector"
                   side="right"
@@ -466,6 +495,11 @@ export default function App() {
                     onMutateStructure={handleStructureMutation}
                     onValidate={() => requestWorkspaceAction(handleValidate)}
                     onOpenPath={handleDesktopFileSelect}
+                    javascriptEnabled={workspace.project.preview.javascriptEnabled}
+                    javascriptSettingsBusy={operationBusy}
+                    previewOrigin={previewOrigin}
+                    previewRuntime={previewRuntime}
+                    onJavascriptEnabledChange={handleJavascriptEnabledChange}
                   />
                 </ResizableSidebar>
               )}
@@ -522,6 +556,11 @@ export default function App() {
                     onMutateStructure={handleStructureMutation}
                     onValidate={() => requestWorkspaceAction(handleValidate)}
                     onOpenPath={handleDesktopFileSelect}
+                    javascriptEnabled={workspace.project.preview.javascriptEnabled}
+                    javascriptSettingsBusy={operationBusy}
+                    previewOrigin={previewOrigin}
+                    previewRuntime={previewRuntime}
+                    onJavascriptEnabledChange={handleJavascriptEnabledChange}
                   />
                 </>
               )}
@@ -583,6 +622,11 @@ export default function App() {
                   onMutateStructure={handleStructureMutation}
                   onValidate={() => requestWorkspaceAction(handleValidate)}
                   onOpenPath={handleMobileFileSelect}
+                  javascriptEnabled={workspace.project.preview.javascriptEnabled}
+                  javascriptSettingsBusy={operationBusy}
+                  previewOrigin={previewOrigin}
+                  previewRuntime={previewRuntime}
+                  onJavascriptEnabledChange={handleJavascriptEnabledChange}
                 />
               )}
               {mobileView === "runtime" && <RuntimeUnavailable stOrigin={st.session?.origin} />}
@@ -632,6 +676,7 @@ export default function App() {
               await workspace.importProjectJson(input.file, {
                 name: input.name,
                 version: input.version,
+                preview: input.preview,
               });
               setProjectDialogOpen(false);
             }, "Preset 已导入并拆分为工程")
@@ -641,6 +686,7 @@ export default function App() {
               await workspace.importProjectArchive(input.file, {
                 name: input.name,
                 version: input.version,
+                javascriptPolicy: input.javascriptPolicy,
               });
               setProjectDialogOpen(false);
             }, "工程包已作为新工程导入")
@@ -707,6 +753,7 @@ export default function App() {
           onOpenChange={setSettingsDialogOpen}
           project={workspace.project}
           busy={operationBusy}
+          previewOrigin={previewOrigin}
           onSave={(input) => {
             void runOperation(async () => {
               await workspace.updateProjectSettings(input);

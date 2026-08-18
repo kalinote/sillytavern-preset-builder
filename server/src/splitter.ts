@@ -154,6 +154,9 @@ function makeManifest(
       regex: Boolean(regexDetection?.binding.consistent),
       scripts: Array.isArray(getAtPath(original, ["extensions", "tavern_helper", "scripts"])),
     },
+    preview: {
+      javascriptEnabled: input.preview?.javascriptEnabled ?? true,
+    },
     ...(regexDetection ? { regexMirrorBinding: regexDetection.binding } : {}),
     preservation: {
       unknownFields: "preset.base.json",

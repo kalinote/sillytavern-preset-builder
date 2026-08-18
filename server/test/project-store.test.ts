@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -120,6 +120,83 @@ test("import splits and rebuilds a preset with deep semantic equality", async ()
     assert(files.some((entry) => entry.path.endsWith("/content.md")));
     assert(files.some((entry) => entry.path.endsWith("/replace.html")));
     assert(files.some((entry) => entry.path.endsWith("/content.js")));
+  });
+});
+
+test("JavaScript preview permission is project-only, revision-aware, and safe for legacy projects", async () => {
+  await withStore(async (store, root) => {
+    const preset = fixturePreset();
+    const enabled = await store.importProject({ name: "Preview enabled", preset });
+    assert.equal(enabled.preview.javascriptEnabled, true);
+    assert.equal(Object.hasOwn((await store.buildProject(enabled.id)).preset, "preview"), false);
+
+    const disabled = await store.importProject({
+      name: "Preview disabled",
+      preset,
+      preview: { javascriptEnabled: false },
+    });
+    assert.equal(disabled.preview.javascriptEnabled, false);
+
+    const updated = await store.updateProject(disabled.id, {
+      ifProjectRevision: disabled.updatedAt,
+      preview: { javascriptEnabled: true },
+    });
+    assert.equal(updated.preview.javascriptEnabled, true);
+    const source = await store.readSourceJson(disabled.id);
+    await store.replaceSourceJson(disabled.id, { content: source.content, ifRevision: source.revision });
+    assert.equal((await store.getProject(disabled.id)).preview.javascriptEnabled, true);
+
+    const manifestPath = join(root, enabled.id, "project.json");
+    const legacyManifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    delete legacyManifest.preview;
+    await writeFile(manifestPath, `${JSON.stringify(legacyManifest, null, 2)}\n`, "utf8");
+    assert.equal((await store.getProject(enabled.id)).preview.javascriptEnabled, false);
+  });
+});
+
+test("preview runtime manifest preserves script and regex order without inlining executable source", async () => {
+  await withStore(async (store) => {
+    const preset = fixturePreset();
+    const helper = ((preset.extensions as JsonObject).tavern_helper as JsonObject);
+    const scripts = helper.scripts as JsonObject[];
+    scripts.push({
+      type: "script",
+      id: "script-disabled",
+      name: "Disabled helper",
+      enabled: false,
+      content: "console.log('must not start')",
+      data: {},
+    });
+    const project = await store.importProject({ name: "Runtime manifest", preset });
+    const runtime = await store.getPreviewRuntimeManifest(project.id);
+
+    assert.equal(runtime.projectId, project.id);
+    assert.equal(runtime.javascriptEnabled, true);
+    assert.equal(runtime.scripts.length, 2);
+    assert.deepEqual(runtime.scripts.map((script) => ({
+      id: script.id,
+      index: script.index,
+      enabled: script.enabled,
+      executable: script.executable,
+    })), [
+      { id: "script-one", index: 0, enabled: true, executable: true },
+      { id: "script-disabled", index: 1, enabled: false, executable: true },
+    ]);
+    assert.equal(runtime.scripts[0]?.path.endsWith("/content.js"), true);
+    assert.equal(runtime.scripts[0]?.byteLength, Buffer.byteLength("export function main() {\n  return 'ok';\n}\n"));
+    assert.match(runtime.scripts[0]?.contentHash ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(runtime.totalEnabledScriptBytes, runtime.scripts[0]?.byteLength);
+    assert.deepEqual(runtime.regexScripts.map((regex) => ({ name: regex.name, index: regex.index })), [
+      { name: "Card frame", index: 0 },
+    ]);
+    assert.deepEqual(runtime.compatibility.promptTemplateHints, ["ChatSquash", "RegexBinding"]);
+
+    const disabled = await store.updateProject(project.id, {
+      ifProjectRevision: project.updatedAt,
+      preview: { javascriptEnabled: false },
+    });
+    assert.equal(disabled.preview.javascriptEnabled, false);
+    assert.equal((await store.getPreviewRuntimeManifest(project.id)).javascriptEnabled, false);
   });
 });
 

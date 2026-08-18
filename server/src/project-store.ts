@@ -28,6 +28,7 @@ import type {
   ProjectFile,
   ProjectFileEntry,
   ProjectManifest,
+  PreviewRuntimeManifest,
   ProjectSnapshotSummary,
   ProjectStructure,
   ProjectSummary,
@@ -37,6 +38,29 @@ import type {
 
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const SOURCE_JSON_PATH = "preset.json";
+
+function optionalText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+async function readJsonObject(path: string, label: string): Promise<JsonObject> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch {
+    throw new ApiError(422, "INVALID_PROJECT", `${label} is not valid JSON`);
+  }
+  if (!isJsonObject(value)) throw new ApiError(422, "INVALID_PROJECT", `${label} must contain an object`);
+  return value;
+}
+
+async function readOrderedItems(path: string, label: string): Promise<JsonObject[]> {
+  const index = await readJsonObject(path, label);
+  if (index.schemaVersion !== 1 || !Array.isArray(index.items) || !index.items.every(isJsonObject)) {
+    throw new ApiError(422, "INVALID_PROJECT", `${label} has an unsupported structure`);
+  }
+  return index.items;
+}
 
 interface ItemDirectoryMetadata {
   displayName: string;
@@ -139,7 +163,9 @@ export class ProjectStore {
     return projects;
   }
 
-  async createEmptyProject(input: { name?: string; version?: string } = {}): Promise<ProjectManifest> {
+  async createEmptyProject(
+    input: { name?: string; version?: string; preview?: { javascriptEnabled: boolean } } = {},
+  ): Promise<ProjectManifest> {
     const name = validateLabel(input.name, "name", 120);
     const version = validateLabel(input.version, "version", 80);
     return this.importProject({
@@ -147,6 +173,7 @@ export class ProjectStore {
       preset: createBlankPreset(),
       ...(name === undefined ? {} : { name }),
       ...(version === undefined ? {} : { version }),
+      ...(input.preview === undefined ? {} : { preview: input.preview }),
     });
   }
 
@@ -155,6 +182,9 @@ export class ProjectStore {
     const version = validateLabel(input.version, "version", 80);
     const sourcePresetName = validateLabel(input.sourcePresetName, "sourcePresetName", 120);
     const sourceStVersion = validateLabel(input.sourceStVersion, "sourceStVersion", 80);
+    if (input.preview !== undefined && typeof input.preview.javascriptEnabled !== "boolean") {
+      throw new ApiError(400, "INVALID_INPUT", "preview.javascriptEnabled must be a boolean");
+    }
     if (!isJsonObject(input.preset)) throw new ApiError(422, "INVALID_PRESET", "Preset JSON root must be an object");
     await this.initialize();
     const id = `project-${randomUUID()}`;
@@ -169,6 +199,7 @@ export class ProjectStore {
           ...(version !== undefined ? { version } : {}),
           ...(sourcePresetName !== undefined ? { sourcePresetName } : {}),
           ...(sourceStVersion !== undefined ? { sourceStVersion } : {}),
+          ...(input.preview === undefined ? {} : { preview: input.preview }),
         };
         const manifest = await splitPresetProject(projectRoot, id, normalizedInput);
         const built = await buildPresetProject(projectRoot);
@@ -189,10 +220,20 @@ export class ProjectStore {
 
   async importProjectArchive(
     archive: Uint8Array,
-    overrides: { name?: string; version?: string } = {},
+    overrides: {
+      name?: string;
+      version?: string;
+      javascriptPolicy?: "preserve" | "force-disabled" | "force-enabled";
+    } = {},
   ): Promise<{ project: ProjectManifest; originalProjectId: string; idRegenerated: true }> {
     const overrideName = validateLabel(overrides.name, "name", 120);
     const overrideVersion = validateLabel(overrides.version, "version", 80);
+    if (
+      overrides.javascriptPolicy !== undefined
+      && !["preserve", "force-disabled", "force-enabled"].includes(overrides.javascriptPolicy)
+    ) {
+      throw new ApiError(400, "INVALID_INPUT", "javascriptPolicy is not supported");
+    }
     await this.initialize();
     const stagingParent = join(this.workspaceRoot, ".staging");
     const stagingRoot = join(stagingParent, `import-${randomUUID()}`);
@@ -215,6 +256,13 @@ export class ProjectStore {
         createdAt: now,
         updatedAt: now,
         source: { ...importedManifest.source, type: "project-package" },
+        preview: {
+          javascriptEnabled: overrides.javascriptPolicy === "force-disabled"
+            ? false
+            : overrides.javascriptPolicy === "force-enabled"
+              ? true
+              : importedManifest.preview.javascriptEnabled,
+        },
       };
       await Promise.all([
         mkdir(join(stagingRoot, "snapshots"), { recursive: true }),
@@ -245,6 +293,7 @@ export class ProjectStore {
     }
     const managedPaths = isJsonObject(value) && isJsonObject(value.managedPaths) ? value.managedPaths : undefined;
     const source = isJsonObject(value) && isJsonObject(value.source) ? value.source : undefined;
+    const preview = isJsonObject(value) && isJsonObject(value.preview) ? value.preview : undefined;
     if (
       !isJsonObject(value) ||
       value.schemaVersion !== 2 ||
@@ -265,7 +314,17 @@ export class ProjectStore {
     ) {
       throw new ApiError(422, "INVALID_PROJECT", "project.json has an unsupported structure");
     }
-    return value as unknown as ProjectManifest;
+    if (preview !== undefined && typeof preview.javascriptEnabled !== "boolean") {
+      throw new ApiError(422, "INVALID_PROJECT", "project.json preview.javascriptEnabled must be a boolean");
+    }
+    return {
+      ...(value as unknown as ProjectManifest),
+      preview: {
+        // Projects created before dynamic previews existed must never start
+        // executing code just because Preset Studio was upgraded.
+        javascriptEnabled: preview?.javascriptEnabled === true,
+      },
+    };
   }
 
   async getProject(projectId: string): Promise<ProjectManifest> {
@@ -273,9 +332,91 @@ export class ProjectStore {
     return this.withProjectLock(projectId, () => this.readManifest(projectRoot));
   }
 
+  async getPreviewRuntimeManifest(projectId: string): Promise<PreviewRuntimeManifest> {
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      const scripts = [] as PreviewRuntimeManifest["scripts"];
+      const regexScripts = [] as PreviewRuntimeManifest["regexScripts"];
+
+      if (manifest.managedPaths.scripts) {
+        const items = await readOrderedItems(join(projectRoot, "scripts", "index.json"), "scripts/index.json");
+        for (let index = 0; index < items.length; index += 1) {
+          const item = items[index] as JsonObject;
+          const uid = optionalText(item.uid);
+          if (!uid) throw new ApiError(422, "INVALID_PROJECT", `scripts/index.json items[${index}] is missing uid`);
+          const meta = await readJsonObject(join(projectRoot, "scripts", uid, "meta.json"), `scripts/${uid}/meta.json`);
+          const path = `scripts/${uid}/content.js`;
+          const executable = item.contentKind === "text";
+          const source = executable ? await readFile(join(projectRoot, path), "utf8") : "";
+          scripts.push({
+            uid,
+            id: optionalText(meta.id) ?? optionalText(item.id) ?? uid,
+            name: optionalText(meta.name) ?? optionalText(item.name) ?? `Script ${index + 1}`,
+            index,
+            enabled: meta.enabled !== false,
+            executable,
+            path,
+            byteLength: Buffer.byteLength(source),
+            contentHash: stableSha256(source),
+          });
+        }
+      }
+
+      if (manifest.managedPaths.regex) {
+        const items = await readOrderedItems(join(projectRoot, "regex", "index.json"), "regex/index.json");
+        for (let index = 0; index < items.length; index += 1) {
+          const item = items[index] as JsonObject;
+          const uid = optionalText(item.uid);
+          if (!uid) throw new ApiError(422, "INVALID_PROJECT", `regex/index.json items[${index}] is missing uid`);
+          const meta = await readJsonObject(join(projectRoot, "regex", uid, "meta.json"), `regex/${uid}/meta.json`);
+          regexScripts.push({
+            uid,
+            id: optionalText(meta.id) ?? optionalText(item.id) ?? uid,
+            name: optionalText(meta.scriptName) ?? optionalText(item.name) ?? `Regex ${index + 1}`,
+            index,
+            disabled: meta.disabled === true,
+            runOnEdit: meta.runOnEdit === true,
+            findPath: `regex/${uid}/find.txt`,
+            replacePath: `regex/${uid}/replace.html`,
+            metaPath: `regex/${uid}/meta.json`,
+          });
+        }
+      }
+
+      const base = await readJsonObject(join(projectRoot, "preset.base.json"), "preset.base.json");
+      const extensions = isJsonObject(base.extensions) ? base.extensions : undefined;
+      const spreset = extensions && isJsonObject(extensions.SPreset) ? extensions.SPreset : undefined;
+      const promptTemplateHints = ["ChatSquash", "MacroNest", "RegexBinding"]
+        .filter((name) => spreset && Object.hasOwn(spreset, name));
+
+      return {
+        projectId: manifest.id,
+        projectUpdatedAt: manifest.updatedAt,
+        javascriptEnabled: manifest.preview.javascriptEnabled,
+        scripts,
+        regexScripts,
+        totalEnabledScriptBytes: scripts.reduce(
+          (total, script) => total + (script.enabled && script.executable ? script.byteLength : 0),
+          0,
+        ),
+        compatibility: {
+          spresetPresent: spreset !== undefined,
+          promptTemplateHints,
+        },
+      };
+    });
+  }
+
   async updateProject(
     projectId: string,
-    input: { ifProjectRevision: string; name?: string; version?: string; targetPresetName?: string },
+    input: {
+      ifProjectRevision: string;
+      name?: string;
+      version?: string;
+      targetPresetName?: string;
+      preview?: { javascriptEnabled: boolean };
+    },
   ): Promise<ProjectManifest> {
     if (typeof input.ifProjectRevision !== "string" || !input.ifProjectRevision) {
       throw new ApiError(400, "INVALID_INPUT", "ifProjectRevision is required");
@@ -300,6 +441,12 @@ export class ProjectStore {
       if (targetPresetName !== undefined) {
         if (!targetPresetName) throw new ApiError(400, "INVALID_INPUT", "targetPresetName must not be empty");
         manifest.targetPresetName = targetPresetName;
+      }
+      if (input.preview !== undefined) {
+        if (typeof input.preview.javascriptEnabled !== "boolean") {
+          throw new ApiError(400, "INVALID_INPUT", "preview.javascriptEnabled must be a boolean");
+        }
+        manifest.preview = { javascriptEnabled: input.preview.javascriptEnabled };
       }
       manifest.updatedAt = new Date().toISOString();
       await atomicWriteFile(join(projectRoot, "project.json"), stringifyJson(manifest as unknown as JsonObject));
@@ -606,6 +753,7 @@ export class ProjectStore {
         version: manifest.version,
         ...(manifest.source.presetName ? { sourcePresetName: manifest.source.presetName } : {}),
         ...(manifest.source.stVersion ? { sourceStVersion: manifest.source.stVersion } : {}),
+        preview: structuredClone(manifest.preview),
       });
       const nextManifest: ProjectManifest = {
         ...stagedManifest,
@@ -616,6 +764,7 @@ export class ProjectStore {
         updatedAt: new Date().toISOString(),
         source: structuredClone(manifest.source),
         targetPresetName: manifest.targetPresetName,
+        preview: structuredClone(manifest.preview),
       };
       if (manifest.originalJsonSha256) nextManifest.originalJsonSha256 = manifest.originalJsonSha256;
       else delete nextManifest.originalJsonSha256;

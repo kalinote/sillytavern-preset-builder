@@ -18,6 +18,10 @@ export interface RegexMirrorBinding {
   promptIdentifier?: string;
 }
 
+export interface ProjectPreviewSettings {
+  javascriptEnabled: boolean;
+}
+
 export interface ProjectManifest {
   schemaVersion: 2;
   id: string;
@@ -34,10 +38,48 @@ export interface ProjectManifest {
   originalJsonSha256?: string;
   buildRulesVersion: 1;
   managedPaths: ManagedPaths;
+  preview: ProjectPreviewSettings;
   regexMirrorBinding?: RegexMirrorBinding;
   preservation: {
     unknownFields: "preset.base.json";
     semanticRoundTrip: true;
+  };
+}
+
+export interface PreviewRuntimeScript {
+  uid: string;
+  id: string;
+  name: string;
+  index: number;
+  enabled: boolean;
+  executable: boolean;
+  path: string;
+  byteLength: number;
+  contentHash: string;
+}
+
+export interface PreviewRuntimeRegex {
+  uid: string;
+  id: string;
+  name: string;
+  index: number;
+  disabled: boolean;
+  runOnEdit: boolean;
+  findPath: string;
+  replacePath: string;
+  metaPath: string;
+}
+
+export interface PreviewRuntimeManifest {
+  projectId: string;
+  projectUpdatedAt: string;
+  javascriptEnabled: boolean;
+  scripts: PreviewRuntimeScript[];
+  regexScripts: PreviewRuntimeRegex[];
+  totalEnabledScriptBytes: number;
+  compatibility: {
+    spresetPresent: boolean;
+    promptTemplateHints: string[];
   };
 }
 
@@ -198,4 +240,5 @@ export interface ImportProjectInput {
   sourceType?: ProjectSourceType;
   sourcePresetName?: string;
   sourceStVersion?: string;
+  preview?: ProjectPreviewSettings;
 }

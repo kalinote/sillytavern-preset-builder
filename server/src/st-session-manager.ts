@@ -291,7 +291,12 @@ export class StSessionManager {
 
   async createProjectFromSt(
     token: string | undefined,
-    input: { presetName: unknown; name?: string; version?: string },
+    input: {
+      presetName: unknown;
+      name?: string;
+      version?: string;
+      preview?: { javascriptEnabled: boolean };
+    },
   ) {
     const presetName = validatePresetName(input.presetName);
     const record = this.requireUsableRecord(token);
@@ -303,6 +308,7 @@ export class StSessionManager {
       sourceStVersion: record.version,
       ...(input.name === undefined ? {} : { name: input.name }),
       ...(input.version === undefined ? {} : { version: input.version }),
+      ...(input.preview === undefined ? {} : { preview: input.preview }),
     });
     return { project, source: { presetName: snapshot.name } };
   }

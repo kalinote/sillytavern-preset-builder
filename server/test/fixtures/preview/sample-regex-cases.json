@@ -1,0 +1,30 @@
+[
+  {
+    "name": "思维链美化 · 表裏",
+    "find": "/([\\s\\S]*)<\\/(think_?fox~?)>/",
+    "input": "analysis body</think_fox~>",
+    "replace": "```html\n<section id=thought-card data-close=\"$2\"><button onclick=\"document.body.dataset.sample='thought'\">$1</button><script>window.parent.TavernHelper.getVariables();<\/script></section>\n```",
+    "expected": ["id=thought-card", "data-close=\"think_fox~\"", "analysis body", "window.parent.TavernHelper"]
+  },
+  {
+    "name": "行动选项美化 · 狐策",
+    "find": "<fox_selc>[\\s\\S]*?<\\/fox_selc>",
+    "input": "before<fox_selc>one|two</fox_selc>after",
+    "replace": "```html\n<!doctype html><button id=fox-selection onclick=\"this.dataset.clicked='yes'\">selection-ready</button><script>parent.getChatMessages('0-{{lastMessageId}}');<\/script>\n```",
+    "expected": ["before", "id=fox-selection", "parent.getChatMessages", "after"]
+  },
+  {
+    "name": "用户推进美化 · 狐令",
+    "find": "<fox_input>[\\s\\S]*?<\\/fox_input>",
+    "input": "<fox_input>continue the story</fox_input>",
+    "replace": "```html\n<!doctype html><form id=fox-input><button type=button onclick=\"document.body.dataset.command='sent'\">continue</button><script>window.addEventListener('DOMContentLoaded', () => parent.SillyTavern.getContext());<\/script></form>\n```",
+    "expected": ["id=fox-input", "DOMContentLoaded", "parent.SillyTavern.getContext"]
+  },
+  {
+    "name": "双语字幕美化",
+    "find": "/<bi>\\s*([\\s\\S]*?)\\s*[|｜]\\s*([\\s\\S]*?)\\s*<\\/bi>/g",
+    "input": "<bi>Hello | 你好</bi> / <bi>Bye｜再见</bi>",
+    "replace": "<div class=bi><span class=original>$1</span><span class=translated>$2</span></div>",
+    "expected": ["Hello", "你好", "Bye", "再见"]
+  }
+]

@@ -6,6 +6,8 @@ import { DEFAULT_ARCHIVE_LIMITS, type ArchiveLimits } from "./archive.js";
 import { ApiError, asApiError } from "./errors.js";
 import { isJsonObject } from "./json.js";
 import { ProjectStore } from "./project-store.js";
+import { isPreviewAssetPath, readPreviewAsset } from "./preview-assets.js";
+import { renderPreviewRuntimeDocument } from "./preview-runtime.js";
 import {
   ST_SESSION_COOKIE,
   StSessionManager,
@@ -26,6 +28,9 @@ export interface ApiServerOptions {
   allowedOrigins?: string[];
   exposeWorkspacePath?: boolean;
   stSessionOptions?: Partial<StSessionManagerOptions>;
+  previewOrigin?: string | false;
+  previewRuntimeEnabled?: boolean;
+  previewParentOrigins?: string[];
 }
 
 interface MultipartPart {
@@ -37,6 +42,26 @@ interface MultipartPart {
 
 const CORS_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 const CORS_HEADERS = ["content-type", "if-match", "x-project-name", "x-project-version"] as const;
+
+function parsePreviewSettings(value: unknown): { javascriptEnabled: boolean } | undefined {
+  if (value === undefined) return undefined;
+  if (!isJsonObject(value) || typeof value.javascriptEnabled !== "boolean") {
+    throw new ApiError(400, "INVALID_INPUT", "preview.javascriptEnabled must be a boolean");
+  }
+  return { javascriptEnabled: value.javascriptEnabled };
+}
+
+function previewSettingsInput(value: unknown): { preview?: { javascriptEnabled: boolean } } {
+  const preview = parsePreviewSettings(value);
+  return preview === undefined ? {} : { preview };
+}
+
+function parseBooleanText(value: string | undefined, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new ApiError(400, "INVALID_INPUT", `${field} must be true or false`);
+}
 
 function addVary(response: ServerResponse, value: string): void {
   const current = response.getHeader("Vary");
@@ -56,12 +81,21 @@ function setCommonHeaders(response: ServerResponse): void {
   response.setHeader("Referrer-Policy", "no-referrer");
 }
 
-function normalizeConfiguredOrigin(value: string): string {
+function setPreviewHeaders(response: ServerResponse, parentOrigins: readonly string[]): void {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader(
+    "Content-Security-Policy",
+    `frame-ancestors ${parentOrigins.length > 0 ? parentOrigins.join(" ") : "'none'"}`,
+  );
+}
+
+function normalizeConfiguredOrigin(value: string, field = "PRESET_STUDIO_ALLOWED_ORIGINS"): string {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Error(`Invalid PRESET_STUDIO_ALLOWED_ORIGINS entry: ${value}`);
+    throw new Error(`Invalid ${field} entry: ${value}`);
   }
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
@@ -71,14 +105,37 @@ function normalizeConfiguredOrigin(value: string): string {
     url.search ||
     url.hash
   ) {
-    throw new Error(`Allowed origin must be an HTTP(S) origin without path, query, or credentials: ${value}`);
+    throw new Error(`${field} must contain HTTP(S) origins without path, query, or credentials: ${value}`);
   }
   return url.origin;
 }
 
 function configuredOrigins(options: ApiServerOptions): Set<string> {
   const values = options.allowedOrigins ?? (process.env.PRESET_STUDIO_ALLOWED_ORIGINS ?? "").split(",");
-  return new Set(values.map((value) => value.trim()).filter(Boolean).map(normalizeConfiguredOrigin));
+  return new Set(values
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => normalizeConfiguredOrigin(value)));
+}
+
+function configuredPreviewOrigin(options: ApiServerOptions): string | undefined {
+  const value = options.previewOrigin ?? process.env.PRESET_STUDIO_PREVIEW_ORIGIN;
+  if (value === false || value === undefined || !value.trim()) return undefined;
+  return normalizeConfiguredOrigin(value, "PRESET_STUDIO_PREVIEW_ORIGIN");
+}
+
+function configuredPreviewParentOrigins(options: ApiServerOptions): string[] {
+  const values = options.previewParentOrigins
+    ?? (process.env.PRESET_STUDIO_PREVIEW_PARENT_ORIGINS ?? "").split(",");
+  return [...new Set(values
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => normalizeConfiguredOrigin(value, "PRESET_STUDIO_PREVIEW_PARENT_ORIGINS")))];
+}
+
+function requestHost(request: IncomingMessage): string | undefined {
+  const value = request.headers.host?.trim().toLowerCase();
+  return value || undefined;
 }
 
 function effectiveRequestOrigin(request: IncomingMessage): string | undefined {
@@ -101,6 +158,7 @@ function authorizeOrigin(
   request: IncomingMessage,
   response: ServerResponse,
   allowedOrigins: ReadonlySet<string>,
+  forbiddenOrigins: ReadonlySet<string> = new Set(),
 ): void {
   const header = request.headers.origin;
   if (header === undefined) return; // CLI, healthcheck, and server-to-server requests.
@@ -109,6 +167,9 @@ function authorizeOrigin(
     origin = normalizeConfiguredOrigin(header);
   } catch {
     throw new ApiError(403, "ORIGIN_NOT_ALLOWED", "Request Origin is not allowed");
+  }
+  if (forbiddenOrigins.has(origin)) {
+    throw new ApiError(403, "ORIGIN_NOT_ALLOWED", "Request Origin is reserved for isolated previews");
   }
 
   const sameOriginByAddress = origin === effectiveRequestOrigin(request);
@@ -168,6 +229,73 @@ function sendError(response: ServerResponse, error: unknown): void {
       ...(apiError.details === undefined ? {} : { details: apiError.details }),
     },
   });
+}
+
+function sendPreviewRuntime(
+  request: IncomingMessage,
+  response: ServerResponse,
+  parentOrigins: readonly string[],
+): void {
+  const content = Buffer.from(renderPreviewRuntimeDocument(parentOrigins));
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/html; charset=utf-8");
+  response.setHeader("Content-Length", content.length);
+  response.setHeader("Cache-Control", "no-store");
+  response.end(request.method === "HEAD" ? undefined : content);
+}
+
+function sendPreviewCompatibilityVersion(request: IncomingMessage, response: ServerResponse): void {
+  const content = Buffer.from(JSON.stringify({
+    pkgVersion: "1.18.0",
+    previewRuntime: true,
+  }));
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("Content-Length", content.length);
+  response.setHeader("Cache-Control", "no-store");
+  response.end(request.method === "HEAD" ? undefined : content);
+}
+
+const PREVIEW_COMPATIBILITY_MODULES: Readonly<Record<string, string>> = Object.freeze({
+  "/script.js": "export const displayVersion = 'SillyTavern 1.18.0';\n",
+  "/scripts/openai.js": `
+export class Message {
+  constructor(value = {}) { Object.assign(this, value); }
+}
+export class MessageCollection extends Array {}
+export const promptManager = {
+  getActiveGroupCharacters() { return []; },
+  preparePrompt(prompt) { return prompt instanceof Message ? prompt : new Message(prompt); },
+};
+export async function sendOpenAIRequest() {
+  throw new Error("OpenAI requests are unavailable in Preset Studio preview");
+}
+`,
+});
+
+function sendPreviewCompatibilityModule(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+): boolean {
+  const source = PREVIEW_COMPATIBILITY_MODULES[pathname];
+  if (source === undefined) return false;
+  const content = Buffer.from(source);
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+  response.setHeader("Content-Length", content.length);
+  response.setHeader("Cache-Control", "no-store");
+  response.end(request.method === "HEAD" ? undefined : content);
+  return true;
+}
+
+async function sendPreviewAsset(request: IncomingMessage, response: ServerResponse, pathname: string): Promise<void> {
+  const asset = await readPreviewAsset(pathname);
+  response.statusCode = 200;
+  response.setHeader("Content-Type", asset.contentType);
+  response.setHeader("Content-Length", asset.content.length);
+  response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  response.end(request.method === "HEAD" ? undefined : asset.content);
 }
 
 async function readRequestBody(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
@@ -262,11 +390,13 @@ async function parseImportRequest(request: IncomingMessage, bodyLimit: number): 
     const name = textPart(parts, "name");
     const version = textPart(parts, "version");
     const sourcePresetName = textPart(parts, "sourcePresetName");
+    const javascriptEnabled = parseBooleanText(textPart(parts, "javascriptEnabled"), "javascriptEnabled");
     return {
       preset: parsed,
       ...(name === undefined ? {} : { name }),
       ...(version === undefined ? {} : { version }),
       ...(sourcePresetName === undefined ? {} : { sourcePresetName }),
+      ...(javascriptEnabled === undefined ? {} : { preview: { javascriptEnabled } }),
     };
   }
 
@@ -279,6 +409,7 @@ async function parseImportRequest(request: IncomingMessage, bodyLimit: number): 
       ...(typeof parsed.name === "string" ? { name: parsed.name } : {}),
       ...(typeof parsed.version === "string" ? { version: parsed.version } : {}),
       ...(typeof parsed.sourcePresetName === "string" ? { sourcePresetName: parsed.sourcePresetName } : {}),
+      ...previewSettingsInput(parsed.preview),
     };
   }
   const headerName = request.headers["x-project-name"];
@@ -293,7 +424,12 @@ async function parseImportRequest(request: IncomingMessage, bodyLimit: number): 
 async function parseArchiveImportRequest(
   request: IncomingMessage,
   maxArchiveBytes: number,
-): Promise<{ archive: Buffer; name?: string; version?: string }> {
+): Promise<{
+  archive: Buffer;
+  name?: string;
+  version?: string;
+  javascriptPolicy?: "preserve" | "force-disabled" | "force-enabled";
+}> {
   const contentType = request.headers["content-type"] ?? "application/octet-stream";
   const multipartAllowance = 1024 * 1024;
   const body = await readRequestBody(request, maxArchiveBytes + multipartAllowance);
@@ -303,10 +439,17 @@ async function parseArchiveImportRequest(
     if (!file) throw new ApiError(400, "FILE_REQUIRED", "Multipart project import requires a file field");
     const name = textPart(parts, "name");
     const version = textPart(parts, "version");
+    const policy = textPart(parts, "javascriptPolicy");
+    if (policy !== undefined && !["preserve", "force-disabled", "force-enabled"].includes(policy)) {
+      throw new ApiError(400, "INVALID_INPUT", "javascriptPolicy is not supported");
+    }
     return {
       archive: file.data,
       ...(name === undefined ? {} : { name }),
       ...(version === undefined ? {} : { version }),
+      ...(policy === undefined ? {} : {
+        javascriptPolicy: policy as "preserve" | "force-disabled" | "force-enabled",
+      }),
     };
   }
   const headerName = request.headers["x-project-name"];
@@ -480,6 +623,17 @@ export function createApiServer(options: ApiServerOptions = {}): {
   };
   const store = new ProjectStore(workspaceRoot, { ...environmentArchiveLimits, ...options.archiveLimits });
   const allowedOrigins = configuredOrigins(options);
+  const configuredPreviewOriginValue = configuredPreviewOrigin(options);
+  const previewRuntimeEnabled = options.previewRuntimeEnabled
+    ?? (configuredPreviewOriginValue !== undefined);
+  const previewOrigin = previewRuntimeEnabled ? configuredPreviewOriginValue : undefined;
+  const previewHost = configuredPreviewOriginValue === undefined
+    ? undefined
+    : new URL(configuredPreviewOriginValue).host.toLowerCase();
+  const previewParentOrigins = configuredPreviewParentOrigins(options);
+  const forbiddenApiOrigins = new Set(
+    configuredPreviewOriginValue === undefined ? [] : [configuredPreviewOriginValue],
+  );
   const exposeWorkspacePath = options.exposeWorkspacePath
     ?? process.env.PRESET_STUDIO_EXPOSE_WORKSPACE_PATH?.toLowerCase() === "true";
   const environmentStOptions: StSessionManagerOptions = {
@@ -501,21 +655,59 @@ export function createApiServer(options: ApiServerOptions = {}): {
   const stSessions = new StSessionManager(store, { ...environmentStOptions, ...options.stSessionOptions });
 
   const server = createServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const pathname = url.pathname;
+    const isPreviewRequest = previewHost !== undefined && requestHost(request) === previewHost;
+    if (isPreviewRequest) {
+      setPreviewHeaders(response, previewParentOrigins);
+      try {
+        if (!previewRuntimeEnabled) {
+          throw new ApiError(404, "NOT_FOUND", "JavaScript preview host is disabled");
+        }
+        if (pathname === "/preview-runtime" && (request.method === "GET" || request.method === "HEAD")) {
+          sendPreviewRuntime(request, response, previewParentOrigins);
+          return;
+        }
+        if (pathname === "/version" && (request.method === "GET" || request.method === "HEAD")) {
+          sendPreviewCompatibilityVersion(request, response);
+          return;
+        }
+        if (
+          (request.method === "GET" || request.method === "HEAD")
+          && sendPreviewCompatibilityModule(request, response, pathname)
+        ) return;
+        if (isPreviewAssetPath(pathname) && (request.method === "GET" || request.method === "HEAD")) {
+          await sendPreviewAsset(request, response, pathname);
+          return;
+        }
+        throw new ApiError(404, "NOT_FOUND", "Preview host only serves the JavaScript runtime");
+      } catch (error) {
+        if (!response.headersSent) sendError(response, error);
+        else response.destroy(error instanceof Error ? error : undefined);
+      }
+      return;
+    }
+
     setCommonHeaders(response);
     try {
-      authorizeOrigin(request, response, allowedOrigins);
+      authorizeOrigin(request, response, allowedOrigins, forbiddenApiOrigins);
       if (request.method === "OPTIONS") {
         handlePreflight(request, response);
         return;
       }
-      const url = new URL(request.url ?? "/", "http://localhost");
-      const pathname = url.pathname;
       if (pathname === "/api/health" && request.method === "GET") {
         sendJson(response, 200, {
           ok: true,
+          previewRuntime: {
+            enabled: previewRuntimeEnabled && previewOrigin !== undefined,
+            ...(previewOrigin === undefined ? {} : { origin: previewOrigin }),
+          },
           ...(exposeWorkspacePath ? { workspaceRoot: store.workspaceRoot } : {}),
         });
         return;
+      }
+      if (pathname === "/preview-runtime") {
+        throw new ApiError(404, "NOT_FOUND", "Preview runtime is only available on its configured origin");
       }
       if (pathname === "/api/st/session" && request.method === "GET") {
         const token = cookieValue(request, ST_SESSION_COOKIE);
@@ -570,6 +762,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
         const project = await store.createEmptyProject({
           ...(typeof body.name === "string" ? { name: body.name } : {}),
           ...(typeof body.version === "string" ? { version: body.version } : {}),
+          ...previewSettingsInput(body.preview),
         });
         sendJson(response, 201, { project });
         return;
@@ -584,6 +777,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
         const imported = await store.importProjectArchive(input.archive, {
           ...(input.name === undefined ? {} : { name: input.name }),
           ...(input.version === undefined ? {} : { version: input.version }),
+          ...(input.javascriptPolicy === undefined ? {} : { javascriptPolicy: input.javascriptPolicy }),
         });
         sendJson(response, 201, {
           project: imported.project,
@@ -601,6 +795,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
           presetName: body.presetName,
           ...(typeof body.name === "string" ? { name: body.name } : {}),
           ...(typeof body.version === "string" ? { version: body.version } : {}),
+          ...previewSettingsInput(body.preview),
         });
         sendJson(response, 201, result);
         return;
@@ -632,6 +827,14 @@ export function createApiServer(options: ApiServerOptions = {}): {
         return;
       }
 
+      const runtimeManifestMatch = /^\/api\/projects\/([^/]+)\/preview\/runtime-manifest$/.exec(pathname);
+      if (runtimeManifestMatch && request.method === "GET") {
+        sendJson(response, 200, {
+          manifest: await store.getPreviewRuntimeManifest(runtimeManifestMatch[1] as string),
+        });
+        return;
+      }
+
       const projectMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
       if (projectMatch && request.method === "GET") {
         sendJson(response, 200, { project: await store.getProject(projectMatch[1] as string) });
@@ -647,6 +850,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
           ...(typeof body.name === "string" ? { name: body.name } : {}),
           ...(typeof body.version === "string" ? { version: body.version } : {}),
           ...(typeof body.targetPresetName === "string" ? { targetPresetName: body.targetPresetName } : {}),
+          ...previewSettingsInput(body.preview),
         });
         sendJson(response, 200, { project });
         return;

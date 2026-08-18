@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
 export interface ProjectChoice {
@@ -52,22 +53,29 @@ interface ProjectManagerDialogProps {
   onSelect: (projectId: string) => void | Promise<void>;
   onCloseProject: () => void | Promise<void>;
   onDeleteProject: (project: ProjectChoice) => void;
-  onCreate: (input: { name: string; version?: string }) => void | Promise<void>;
+  onCreate: (input: {
+    name: string;
+    version?: string;
+    preview: { javascriptEnabled: boolean };
+  }) => void | Promise<void>;
   onImport: (input: {
     name: string;
     version?: string;
     file: File;
     sourcePresetName?: string;
+    preview: { javascriptEnabled: boolean };
   }) => void | Promise<void>;
   onImportArchive: (input: {
     name?: string;
     version?: string;
     file: File;
+    javascriptPolicy: "preserve" | "force-disabled";
   }) => void | Promise<void>;
   onCreateFromSt: (input: {
     presetName: string;
     name?: string;
     version?: string;
+    preview: { javascriptEnabled: boolean };
   }) => void | Promise<void>;
   onRefreshStPresets: () => void | Promise<unknown>;
   onOpenStConnection: () => void;
@@ -98,6 +106,7 @@ export function ProjectManagerDialog({
   const [selectedFile, setSelectedFile] = useState<File>();
   const [localError, setLocalError] = useState<string>();
   const [selectedPresetName, setSelectedPresetName] = useState<string>();
+  const [javascriptEnabled, setJavascriptEnabled] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const selectedKind = selectedFile ? getImportKind(selectedFile) : undefined;
   const presets = stCatalog?.presets ?? [];
@@ -113,7 +122,11 @@ export function ProjectManagerDialog({
       return;
     }
     setLocalError(undefined);
-    await onCreate({ name: name.trim(), version: version.trim() || undefined });
+    await onCreate({
+      name: name.trim(),
+      version: version.trim() || undefined,
+      preview: { javascriptEnabled },
+    });
     setName("");
     setVersion("");
   };
@@ -135,6 +148,7 @@ export function ProjectManagerDialog({
           name: name.trim() || undefined,
           version: version.trim() || undefined,
           file: selectedFile,
+          javascriptPolicy: javascriptEnabled ? "preserve" : "force-disabled",
         });
       } else {
         const text = await selectedFile.text();
@@ -148,6 +162,7 @@ export function ProjectManagerDialog({
           version: version.trim() || undefined,
           file: selectedFile,
           sourcePresetName: fallbackName,
+          preview: { javascriptEnabled },
         });
       }
       setSelectedFile(undefined);
@@ -173,6 +188,7 @@ export function ProjectManagerDialog({
       presetName: effectivePresetName,
       name: name.trim() || undefined,
       version: version.trim() || undefined,
+      preview: { javascriptEnabled },
     });
     setName("");
     setVersion("");
@@ -317,6 +333,10 @@ export function ProjectManagerDialog({
               </div>
             )}
             <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} namePlaceholder="留空使用所选 preset 名称" />
+            <JavascriptPreviewChoice
+              checked={javascriptEnabled}
+              onCheckedChange={setJavascriptEnabled}
+            />
             <Button className="w-full" disabled={busy || !effectivePresetName || stSession?.status !== "connected"} onClick={() => runSafely(createFromSt)}>
               {busy ? <LoaderCircle className="animate-spin" /> : <RadioTower />}
               从所选 preset 创建工程
@@ -363,6 +383,11 @@ export function ProjectManagerDialog({
               </div>
             )}
             <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} />
+            <JavascriptPreviewChoice
+              checked={javascriptEnabled}
+              onCheckedChange={setJavascriptEnabled}
+              preserveWhenEnabled={selectedKind === "archive"}
+            />
             <Button className="w-full" disabled={busy || !selectedFile} onClick={() => runSafely(importProject)}>
               {busy ? <LoaderCircle className="animate-spin" /> : <Upload />}
               {selectedKind === "archive" ? "导入工程包副本" : "导入并创建拆分工程"}
@@ -374,6 +399,10 @@ export function ProjectManagerDialog({
               空白工程会创建标准 Chat Completion preset 基础结构，version 可以留空并稍后维护。
             </div>
             <ProjectFields name={name} version={version} onName={setName} onVersion={setVersion} />
+            <JavascriptPreviewChoice
+              checked={javascriptEnabled}
+              onCheckedChange={setJavascriptEnabled}
+            />
             <Button className="w-full" disabled={busy} onClick={() => runSafely(createProject)}>
               {busy ? <LoaderCircle className="animate-spin" /> : <Plus />}
               创建空白工程
@@ -442,6 +471,34 @@ function ProjectFields({
         </span>
         <Input value={version} onChange={(event) => onVersion(event.target.value)} placeholder="例如 v18" />
       </label>
+    </div>
+  );
+}
+
+function JavascriptPreviewChoice({
+  checked,
+  onCheckedChange,
+  preserveWhenEnabled = false,
+}: {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  preserveWhenEnabled?: boolean;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+      <div className="min-w-0">
+        <p className="text-xs font-medium">允许动态 JavaScript 预览</p>
+        <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
+          {preserveWhenEnabled
+            ? "开启时保留工程包内的设置；关闭时强制禁用。脚本可以联网并产生外部副作用。"
+            : "开启后可在独立预览环境中手动运行用户脚本。仅运行你信任的代码，之后可随时关闭。"}
+        </p>
+      </div>
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        aria-label="允许动态 JavaScript 预览"
+      />
     </div>
   );
 }

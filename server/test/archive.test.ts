@@ -53,11 +53,17 @@ test("project ZIP download and import preserve the split project and always rege
     assert.equal(imported.project.name, "Imported copy");
     assert.equal(imported.project.version, "v2");
     assert.equal(imported.project.source.type, "project-package");
+    assert.equal(imported.project.preview.javascriptEnabled, true);
     assert.equal((await store.readProjectFile(imported.project.id, "notes/readme.txt")).content, "Preserved unknown project file");
     assert.deepEqual((await store.buildProject(imported.project.id)).preset, sourcePreset);
 
+    const forcedDisabled = await store.importProjectArchive(archive.content, {
+      javascriptPolicy: "force-disabled",
+    });
+    assert.equal(forcedDisabled.project.preview.javascriptEnabled, false);
+
     const projects = await store.listProjects();
-    assert.equal(projects.length, 2);
+    assert.equal(projects.length, 3);
     assert(!projects.some((project) => project.id === ".staging"));
   });
 });

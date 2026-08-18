@@ -9,7 +9,7 @@
 - 桌面与横屏平板使用 Monaco，手机使用 CodeMirror 6；大文件按需加载。
 - 850ms 防抖自动保存；切换文件、编辑器失焦、构建、导出和推送前强制写盘。
 - Revision 乐观并发控制、原子写入、路径穿越/符号链接逃逸防护，以及受限的 ZIP 导入。
-- HTML/CSS 无脚本静态预览；iframe 不授予脚本权限，项目 JavaScript 不会在工具中执行。
+- HTML/CSS 静态预览，以及由项目开关和手动启动控制的独立 Origin 动态 HTML/JavaScript 预览。
 - 构建、带版本和时间戳的 JSON 导出，以及 Docker 工作区持久化。
 - Node 服务直接连接已有的 SillyTavern 1.18.x，不需要安装 ST 扩展；可列出/读取 Chat Completion presets，并从所选 preset 创建一次性工程快照。
 - 推送前生成绑定当前工程和远端目标的短时预览，用户确认后手动保存 preset 到 ST。
@@ -18,7 +18,21 @@
 - 手动/自动快照、恢复与保留策略；删除条目、应用完整 JSON 和恢复前自动建立恢复点。
 - 工程设置、validate-only 构建诊断及文件定位；阻断性错误会阻止 JSON 导出与 ST 推送。
 
-上下文快照、最终 Prompt/token/DOM 捕获和 PWA 仍属于后续阶段。没有 ST 页面扩展时，工具不能读取已打开页面的 DOM/Console，也不能让该页面热切换 preset；界面不会用模拟结果冒充真实 ST 运行数据。
+真实 ST 上下文快照、token/DOM 捕获和 PWA 仍属于后续阶段。Preset Studio 现在可以生成明确标注为 dry-run 的本地最终 Prompt 快照，但它不是已打开 ST 页面或真实模型请求的捕获。没有 ST 页面扩展时，工具不能读取已打开页面的 DOM/Console，也不能让该页面热切换 preset。
+
+### 动态 JavaScript 与 EJS 预览
+
+- 新建、JSON/ST 导入时可选择是否允许动态 JavaScript；ZIP 可保留包内设置或在导入时强制关闭。旧工程缺少该设置时默认关闭。
+- 允许后仍需在检查器“预览”页签手动点击“启动”。HTML 中的 `<script>`、inline handler 和标准浏览器 API 会在独立 Preview Origin 中执行；停止或关闭开关会销毁运行时。
+- 动态脚本能够联网、写入 Preview Origin 存储并产生外部副作用。只运行可信代码；停止不会撤销已经完成的请求、下载或远端写入。
+- Preview Host 不能访问 Studio `/api`、Cookie 或 DOM。配置错误时不会降级为同源执行。
+- 已启用的 `scripts/*/content.js` 会按预设顺序执行一次；消息 HTML、内联事件、外链/模块脚本、项目正则替换和基础 `TavernHelper`/`SillyTavern` 兼容层可在同一会话中协作。
+- 提供样本所需的 SPreset/RegexBinding 引导兼容，包括 `chatCompletionSettings`、可重排事件源、`setPreset('in_use', patch)` 深层合并、ST 1.18 版本探测和固定模块入口；这与 Prompt Template 的 EJS 扩展是两条独立兼容链路。
+- 大于等于 512 KiB 的项目脚本使用带逐块确认、取消和 SHA-256 校验的 MessagePort 分块传输；单脚本上限为 16 MiB。
+- Preview Host 若启动握手失败、运行中意外重载或通信解码失败，会销毁失效运行时并显示“运行失败”；可直接再次点击“启动”，不会复用旧通道。
+- Prompt `content.md` 和正则结果支持锁定版本 EJS `3.1.10` 的 EJS-1 子集，包括转义/原始输出、控制流、注释、async、变量、消息、角色和渲染/生成场景。模板在一次性无同源权限 frame 中求值。
+- “模拟生成管线”会按当前 preset `prompt_order` 和 Preview Context 组装消息，依次触发生成开始、组合前后、Chat Completion prompt、`GENERATE_AFTER_DATA` 与发送设置事件，运行生成期 EJS，并展示脚本改写后的最终消息和设置。它不会请求模型或写回聊天；事件监听器本身仍会真实执行。
+- 当前不实现真实模型生成、精确 ST token/世界书/角色上下文组装、世界书持久化、斜杠命令或真实 ST DOM，也不支持 Prompt Template 的 include、装饰器和完整插件扩展。详见[动态预览实现与兼容状态](./docs/Preset-Studio-动态预览实现与兼容状态.md)。
 
 ## 连接 SillyTavern
 
@@ -47,7 +61,7 @@ pnpm --dir server install
 pnpm dev
 ```
 
-`pnpm dev` 会同时启动 Vite 前端和 Node 工程服务。Vite 默认尝试 `4173`，端口被占用时会选择下一个端口；API 默认监听 `127.0.0.1:3001`，前端通过同源 `/api` 代理访问。直连 ST 的请求始终由 Node 发出，浏览器不直接持有 ST 登录会话。生产分离托管时也必须由 UI Origin 同源反向代理 `/api`，不能只靠 CORS 跨站携带会话。
+`pnpm dev` 会同时启动 Vite 前端和 Node 工程服务。Vite 固定使用 `4173`，API 默认监听 `127.0.0.1:3001`，前端通过同源 `/api` 代理访问；动态预览使用 `http://localhost:3001`，因此请通过 `http://localhost:4173` 打开开发 UI。直连 ST 的请求始终由 Node 发出，浏览器不直接持有 ST 登录会话。生产分离托管时也必须由 UI Origin 同源反向代理 `/api`，不能只靠 CORS 跨站携带会话。
 
 常用命令：
 
@@ -71,10 +85,17 @@ PRESET_STUDIO_WORKSPACE_HOST=./workspace-data
 PRESET_STUDIO_BIND=127.0.0.1
 PRESET_STUDIO_PORT=3001
 
+# 本机通过 http://127.0.0.1:3001 打开 Studio，localhost:3001 专用于动态预览。
+PRESET_STUDIO_PREVIEW_RUNTIME_ENABLED=true
+PRESET_STUDIO_PREVIEW_ORIGIN=http://localhost:3001
+PRESET_STUDIO_PREVIEW_PARENT_ORIGINS=http://127.0.0.1:3001,http://localhost:3001
+
 # 默认只允许回环 ST；连接局域网 ST 时可改为 private，或配置精确 Origin 白名单。
 PRESET_STUDIO_ST_TARGET_POLICY=allowlist
 PRESET_STUDIO_ST_ALLOWED_ORIGINS=http://192.168.1.20:8000
 ```
+
+服务级预览开关关闭后，项目中的 JavaScript 允许设置不会被改写；配置的 Preview Host 会继续作为保留隔离域存在，但运行时、固定资源、`/api/*` 和其他路径都会返回 `404`。因此反向代理在开关关闭时也不能把预览子域回退到 Studio 站点。
 
 ST 目标策略：
 
@@ -102,4 +123,6 @@ output/
 
 文件名使用工具生成的稳定 UID，原始 identifier、显示名、顺序和未知字段保留在元数据与 manifest 中。无损定义为 JSON 语义一致，不要求字节、缩进或属性顺序一致。
 
-v0.2.0 的目标与事务约束见 [实施计划](./docs/Preset-Studio-v0.2.0-实施计划.md)，后端协议见 [server/README.md](./server/README.md)。
+v0.2.0 的目标与事务约束见 [实施计划](./docs/Preset-Studio-v0.2.0-实施计划.md)，动态脚本能力见 [动态 JavaScript 预览实施计划](./docs/Preset-Studio-动态-JavaScript-预览实施计划.md)和[实现与兼容状态](./docs/Preset-Studio-动态预览实现与兼容状态.md)，后端协议见 [server/README.md](./server/README.md)。
+
+动态预览浏览器测试使用 Playwright。首次运行先执行 `pnpm test:e2e:install` 安装浏览器，然后用 `pnpm test:e2e` 构建并运行 Chromium、Firefox、WebKit 生产矩阵及 React StrictMode 开发构建专项；只跑生产 Chromium 可使用 `pnpm test:e2e:chromium`，只跑 StrictMode 可使用 `pnpm test:e2e:strict`。`pnpm test:e2e:full-sample` 会导入仓库中的 8.7 MB 样本并在 Chromium 中验证其远程 SPreset/RegexBinding 引导及 dry-run 生成事件链；该专项需要能够访问样本引用的第三方资源，因此不放入默认离线矩阵。

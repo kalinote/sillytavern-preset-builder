@@ -7,22 +7,30 @@ import {
   Info,
   ListChecks,
   Bug,
+  AlertTriangle,
   Maximize2,
   Monitor,
   RefreshCw,
+  Play,
+  RotateCcw,
   ShieldOff,
+  Square,
   Smartphone,
   Tablet,
   ZoomIn,
   ZoomOut,
+  Terminal,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import type { ProjectDiagnostic, ProjectStructure, StructureMutation } from "../../lib/project-api";
+import type { ProjectPreviewRuntime } from "../../preview/use-project-preview-runtime";
 import type { SaveState } from "./workspace-editor-pane";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Switch } from "../ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ItemPropertiesPanel } from "./item-properties-panel";
 import { WorkspaceDiagnostics } from "./workspace-diagnostics";
@@ -46,6 +54,11 @@ interface WorkspaceInspectorProps {
   onMutateStructure?: (mutation: StructureMutation) => void;
   onValidate?: () => void;
   onOpenPath?: (path: string) => void;
+  javascriptEnabled?: boolean;
+  javascriptSettingsBusy?: boolean;
+  previewOrigin?: string;
+  previewRuntime?: ProjectPreviewRuntime;
+  onJavascriptEnabledChange?: (enabled: boolean) => void;
 }
 
 export function WorkspaceInspector({
@@ -67,6 +80,11 @@ export function WorkspaceInspector({
   onMutateStructure,
   onValidate,
   onOpenPath,
+  javascriptEnabled = false,
+  javascriptSettingsBusy,
+  previewOrigin,
+  previewRuntime,
+  onJavascriptEnabledChange,
 }: WorkspaceInspectorProps) {
   const hasItem = Boolean(structure && /^(prompts|regex|scripts)\/[^/]+\//.test(path));
   return (
@@ -93,7 +111,7 @@ export function WorkspaceInspector({
             </TabsTrigger>
             <TabsTrigger value="preview" className="whitespace-nowrap px-2">
               <Eye className="size-3.5" />
-              静态预览
+              预览
             </TabsTrigger>
           </TabsList>
         </div>
@@ -170,7 +188,16 @@ export function WorkspaceInspector({
         </TabsContent>
 
         <TabsContent value="preview" className="min-h-0 flex-1 overflow-y-auto p-3">
-          <StaticFilePreview key={path} path={path} content={content} />
+          <StaticFilePreview
+            path={path}
+            content={content}
+            javascriptEnabled={javascriptEnabled}
+            javascriptSettingsBusy={javascriptSettingsBusy}
+            previewOrigin={previewOrigin}
+            previewRuntime={previewRuntime}
+            onJavascriptEnabledChange={onJavascriptEnabledChange}
+            onOpenPath={onOpenPath}
+          />
         </TabsContent>
       </Tabs>
     </aside>
@@ -212,16 +239,65 @@ const PREVIEW_DEVICES: readonly PreviewDevice[] = [
   { id: "mobile", label: "手机", width: 390, height: 844, icon: Smartphone },
 ];
 
-function StaticFilePreview({ path, content }: { path: string; content: string }) {
+function StaticFilePreview({
+  path,
+  content,
+  javascriptEnabled,
+  javascriptSettingsBusy,
+  previewOrigin,
+  previewRuntime,
+  onJavascriptEnabledChange,
+  onOpenPath,
+}: {
+  path: string;
+  content: string;
+  javascriptEnabled: boolean;
+  javascriptSettingsBusy?: boolean;
+  previewOrigin?: string;
+  previewRuntime?: ProjectPreviewRuntime;
+  onJavascriptEnabledChange?: (enabled: boolean) => void;
+  onOpenPath?: (path: string) => void;
+}) {
   const [deviceId, setDeviceId] = useState<PreviewDevice["id"]>("desktop");
   const [fitToContainer, setFitToContainer] = useState(true);
   const [manualScale, setManualScale] = useState(0.75);
+  const [showLogs, setShowLogs] = useState(false);
+  const [showContext, setShowContext] = useState(false);
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error">("all");
+  const [variablesDraft, setVariablesDraft] = useState("{}");
+  const [contextError, setContextError] = useState<string>();
   const stageRef = useRef<HTMLDivElement>(null);
+  const runtimeMountRef = useRef<HTMLDivElement>(null);
   const stageWidth = useObservedWidth(stageRef);
   const previewContent = useDebouncedValue(content, PREVIEW_DEBOUNCE_MS);
   const extension = path.split(".").at(-1)?.toLowerCase();
-  const canRender = extension === "html" || extension === "css";
+  const regexPath = /^regex\/([^/]+)\/(find\.txt|replace\.html|meta\.json)$/.exec(path);
+  const isPromptTemplateSource = /^prompts\/[^/]+\/content\.md$/i.test(path);
+  const canRenderStatic = extension === "html" || extension === "css";
   const isPreviewPending = content !== previewContent;
+  const dynamicSource = useMemo(() => unwrapCodeFence(previewContent), [previewContent]);
+  const dynamicSourceTooLarge = useMemo(
+    () => extension === "html" && new Blob([dynamicSource]).size > 8 * 1024 * 1024,
+    [dynamicSource, extension],
+  );
+  const runtimeConfiguration = useMemo(() => {
+    if (!previewOrigin) return { error: "服务端尚未配置独立 Preview Host。" };
+    try {
+      const origin = new URL(previewOrigin).origin;
+      if (typeof window !== "undefined" && origin === window.location.origin) {
+        return { error: "Preview Host 与 Studio 同源，已拒绝执行用户脚本。" };
+      }
+      return { origin };
+    } catch {
+      return { error: "Preview Host 地址无效。" };
+    }
+  }, [previewOrigin]);
+  const runtimeStatus = previewRuntime?.status ?? (javascriptEnabled ? "stopped" : "disabled");
+  const runtimeActive = runtimeStatus === "booting"
+    || runtimeStatus === "loading-scripts"
+    || runtimeStatus === "running"
+    || runtimeStatus === "dirty";
   const selectedDevice =
     PREVIEW_DEVICES.find((device) => device.id === deviceId) ?? PREVIEW_DEVICES[0];
   const fitScale = stageWidth
@@ -229,10 +305,64 @@ function StaticFilePreview({ path, content }: { path: string; content: string })
     : MIN_PREVIEW_SCALE;
   const renderedScale = fitToContainer ? fitScale : manualScale;
   const srcDoc = useMemo(() => {
-    if (!canRender) return "";
+    if (!canRenderStatic) return "";
     const source = unwrapCodeFence(previewContent);
     return extension === "css" ? buildCssPreviewDocument(source) : buildHtmlPreviewDocument(source);
-  }, [canRender, extension, previewContent]);
+  }, [canRenderStatic, extension, previewContent]);
+  const filteredLogs = useMemo(
+    () => (previewRuntime?.logs ?? []).filter((entry) => logLevel === "all" || entry.level === logLevel),
+    [logLevel, previewRuntime?.logs],
+  );
+  const pipelineBusy = previewRuntime?.regexBusy === true
+    || previewRuntime?.templateState?.status === "evaluating"
+    || previewRuntime?.generationBusy === true;
+
+  useEffect(() => {
+    setVariablesDraft(JSON.stringify(previewRuntime?.context.variables ?? {}, null, 2));
+  }, [previewRuntime?.context.variables]);
+
+  useEffect(() => {
+    const mount = runtimeMountRef.current;
+    if (!mount || !runtimeActive || !previewRuntime) return;
+    previewRuntime.attach(mount, {
+      width: selectedDevice.width,
+      height: selectedDevice.height,
+      scale: renderedScale,
+    });
+    return () => previewRuntime.detach(mount);
+  }, [previewRuntime?.attach, previewRuntime?.detach, runtimeActive]);
+
+  useEffect(() => {
+    previewRuntime?.setPresentation({
+      width: selectedDevice.width,
+      height: selectedDevice.height,
+      scale: renderedScale,
+    });
+  }, [previewRuntime?.setPresentation, renderedScale, selectedDevice.height, selectedDevice.width]);
+
+  function startRuntime() {
+    if (!javascriptEnabled || !runtimeConfiguration.origin || !previewRuntime) return;
+    void previewRuntime.start().catch(() => undefined);
+  }
+
+  function stopRuntime() {
+    void previewRuntime?.stop(false);
+  }
+
+  function restartRuntime() {
+    void previewRuntime?.restart().catch(() => undefined);
+  }
+
+  function clearPreviewStorage() {
+    if (
+      !previewRuntime
+      || !window.confirm("确定清空 Preview Origin 的 localStorage、sessionStorage、IndexedDB 和 Cache Storage 吗？运行中的预览会先停止，并在清理后重新启动。")
+    ) return;
+    setStorageBusy(true);
+    void previewRuntime.clearSiteStorage()
+      .catch(() => undefined)
+      .finally(() => setStorageBusy(false));
+  }
 
   function adjustScale(delta: number) {
     setManualScale(clamp(renderedScale + delta, MIN_PREVIEW_SCALE, MAX_PREVIEW_SCALE));
@@ -243,18 +373,249 @@ function StaticFilePreview({ path, content }: { path: string; content: string })
     <div className="flex min-h-full flex-col">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <p className="text-xs font-medium">隔离静态画布</p>
+          <p className="text-xs font-medium">
+            {runtimeActive ? "隔离动态画布" : "隔离静态画布"}
+          </p>
           <p className="mt-0.5 text-[10px] text-muted-foreground">
-            HTML/CSS 与无脚本原生控件
+            {runtimeActive
+              ? isPromptTemplateSource ? "Prompt Template 文本与项目 JavaScript" : "HTML 与用户 JavaScript"
+              : "HTML/CSS 与无脚本原生控件"}
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           {isPreviewPending ? <Badge variant="blue">等待刷新</Badge> : null}
-          <Badge variant="amber">脚本禁用</Badge>
+          <Badge variant={runtimeStatus === "failed" ? "red" : runtimeStatus === "running" ? "green" : runtimeStatus === "dirty" ? "amber" : "blue"}>
+            {runtimeStatus === "disabled" ? "脚本禁用"
+              : runtimeStatus === "stopped" ? "允许脚本 · 未启动"
+                : runtimeStatus === "booting" ? "正在连接 Preview Host"
+                  : runtimeStatus === "loading-scripts" ? `正在启动项目脚本 ${previewRuntime?.scripts.filter((script) => script.status === "running" || script.status === "error").length ?? 0}/${previewRuntime?.scripts.length ?? 0}`
+                    : runtimeStatus === "running" ? "脚本运行中"
+                      : runtimeStatus === "dirty" ? "脚本已修改 · 需要重启"
+                        : "运行失败"}
+          </Badge>
         </div>
       </div>
 
-      {canRender ? (
+      <div className="mt-3 rounded-xl border border-border bg-muted/25 p-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="mr-auto flex min-w-0 items-center gap-2">
+            <Switch
+              checked={javascriptEnabled}
+              disabled={javascriptSettingsBusy || !onJavascriptEnabledChange}
+              onCheckedChange={(checked) => {
+                if (!checked) stopRuntime();
+                onJavascriptEnabledChange?.(checked);
+              }}
+              aria-label="允许动态 JavaScript 预览"
+            />
+            <span className="text-[11px] font-medium">允许 JavaScript</span>
+          </div>
+          {!runtimeActive ? (
+            <Button
+              type="button"
+              size="sm"
+              disabled={!javascriptEnabled || !runtimeConfiguration.origin || !previewRuntime}
+              onClick={startRuntime}
+            >
+              <Play />
+              启动
+            </Button>
+          ) : (
+            <>
+              <Button type="button" variant="secondary" size="sm" onClick={restartRuntime}>
+                <RotateCcw />
+                重启
+              </Button>
+              <Button type="button" variant="secondary" size="sm" onClick={stopRuntime}>
+                <Square />
+                停止
+              </Button>
+            </>
+          )}
+          <Button
+            type="button"
+            variant={showLogs ? "subtle" : "ghost"}
+            size="sm"
+            onClick={() => setShowLogs((current) => !current)}
+          >
+            <Terminal />
+            日志{previewRuntime && previewRuntime.logs.length > 0 ? ` ${previewRuntime.logs.length}` : ""}
+          </Button>
+          <Button
+            type="button"
+            variant={showContext ? "subtle" : "ghost"}
+            size="sm"
+            onClick={() => setShowContext((current) => !current)}
+          >
+            <FileText />
+            上下文
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={!javascriptEnabled || !runtimeConfiguration.origin || !previewRuntime || storageBusy}
+            onClick={clearPreviewStorage}
+            title="清空 Preview Origin 站点存储"
+          >
+            <Trash2 />
+            {storageBusy ? "清理中" : "清空存储"}
+          </Button>
+        </div>
+        {javascriptEnabled && runtimeConfiguration.error ? (
+          <p className="mt-2 flex items-start gap-1.5 text-[10px] leading-4 text-destructive">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />{runtimeConfiguration.error}
+          </p>
+        ) : null}
+        {dynamicSourceTooLarge ? (
+          <p className="mt-2 text-[10px] text-destructive">当前 HTML 超过第一版 8 MiB 运行上限。</p>
+        ) : null}
+        {previewRuntime?.largeScriptWarning ? (
+          <p className="mt-2 text-[10px] text-amber-700">启用脚本总量超过 2 MiB；只会在启动或重启时重新加载。</p>
+        ) : null}
+        {previewRuntime?.statusMessage ? <p className="mt-2 text-[10px] text-destructive">{previewRuntime.statusMessage}</p> : null}
+      </div>
+
+      {showContext && previewRuntime ? (
+        <div className="mt-3 space-y-3 rounded-xl border border-border bg-muted/20 p-3 text-[11px]">
+          <div className="grid grid-cols-2 gap-2">
+            <label className="space-y-1"><span className="text-muted-foreground">用户名称</span><input className="h-8 w-full rounded-md border border-border bg-surface px-2" value={previewRuntime.context.user} onChange={(event) => previewRuntime.updateContext({ user: event.target.value })} /></label>
+            <label className="space-y-1"><span className="text-muted-foreground">角色名称</span><input className="h-8 w-full rounded-md border border-border bg-surface px-2" value={previewRuntime.context.char} onChange={(event) => previewRuntime.updateContext({ char: event.target.value })} /></label>
+          </div>
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">当前消息角色</span>
+            <select className="h-8 w-full rounded-md border border-border bg-surface px-2" value={previewRuntime.context.role} onChange={(event) => previewRuntime.updateContext({ role: event.target.value as "system" | "user" | "assistant" })}>
+              <option value="system">system</option><option value="user">user</option><option value="assistant">assistant</option>
+            </select>
+          </label>
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">正则样本文本 / 当前消息</span>
+            <textarea className="min-h-28 w-full resize-y rounded-md border border-border bg-surface p-2 font-mono text-[10px]" value={previewRuntime.context.messages[previewRuntime.context.mesId]?.message ?? ""} onChange={(event) => previewRuntime.updateSampleText(event.target.value)} placeholder="输入包含正则目标标签的样本文本" />
+          </label>
+          {regexPath ? (
+            <div className="grid gap-2 rounded-lg border border-border bg-surface p-2 sm:grid-cols-2">
+              <label className="space-y-1"><span className="text-muted-foreground">执行范围</span><select className="h-8 w-full rounded-md border border-border bg-surface px-2" value={previewRuntime.regexMode} onChange={(event) => previewRuntime.setRegexMode(event.target.value as "current" | "project")}><option value="current">仅当前规则</option><option value="project">按项目顺序</option></select></label>
+              <label className="flex items-center gap-2 self-end pb-1"><Switch checked={previewRuntime.includeDisabledRegex} onCheckedChange={previewRuntime.setIncludeDisabledRegex} /><span>允许临时执行当前禁用规则</span></label>
+            </div>
+          ) : null}
+          <div className="grid gap-2 rounded-lg border border-border bg-surface p-2 sm:grid-cols-2">
+            <label className="flex items-center gap-2 self-center">
+              <Switch checked={previewRuntime.templateEnabled} onCheckedChange={previewRuntime.setTemplateEnabled} />
+              <span>执行 Prompt Template / EJS</span>
+            </label>
+            <label className="space-y-1">
+              <span className="text-muted-foreground">模板场景</span>
+              <select className="h-8 w-full rounded-md border border-border bg-surface px-2" value={previewRuntime.templatePhase} onChange={(event) => previewRuntime.setTemplatePhase(event.target.value as "render" | "generate")}>
+                <option value="render">显示阶段（render）</option>
+                <option value="generate">发送阶段（generate）</option>
+              </select>
+            </label>
+            <p className="sm:col-span-2 text-[10px] text-muted-foreground">先执行当前选择的 Tavern 正则，再在独立的一次性 frame 中求值 EJS，最后创建消息 frame。</p>
+          </div>
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">模拟变量 JSON</span>
+            <textarea className="min-h-24 w-full resize-y rounded-md border border-border bg-surface p-2 font-mono text-[10px]" value={variablesDraft} onChange={(event) => setVariablesDraft(event.target.value)} />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">模拟生成结果（留空时 generate 为不支持能力）</span>
+            <textarea
+              className="min-h-20 w-full resize-y rounded-md border border-border bg-surface p-2 font-mono text-[10px]"
+              value={previewRuntime.context.mockGeneration ?? ""}
+              onChange={(event) => previewRuntime.setMockGeneration(event.target.value || undefined)}
+              placeholder="为 generate / generateRaw 配置固定返回文本"
+            />
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" size="sm" variant="secondary" onClick={() => {
+              try {
+                const parsed = JSON.parse(variablesDraft) as unknown;
+                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("变量必须是对象");
+                previewRuntime.updateContext({ variables: parsed as typeof previewRuntime.context.variables });
+                setContextError(undefined);
+              } catch (error) {
+                setContextError(error instanceof Error ? error.message : String(error));
+              }
+            }}>应用变量</Button>
+            <Button type="button" size="sm" variant="secondary" onClick={previewRuntime.resetContext}>清空内存状态</Button>
+            <Button type="button" size="sm" onClick={() => void previewRuntime.refreshMessage().catch(() => undefined)} disabled={!runtimeActive || pipelineBusy}>刷新消息预览</Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => void previewRuntime.simulateGeneration().catch(() => undefined)}
+              disabled={!runtimeActive || pipelineBusy}
+            >
+              <Play />
+              模拟生成管线
+            </Button>
+            {pipelineBusy ? <span className="text-muted-foreground">正在执行预览管线…</span> : null}
+          </div>
+          {contextError ? <p className="text-destructive">{contextError}</p> : null}
+          {previewRuntime.generationState ? (
+            <div className="space-y-2 border-t border-border pt-2" data-testid="preview-generation-result">
+              <p className={cn("font-medium", previewRuntime.generationState.status === "error" && "text-destructive")}>
+                {previewRuntime.generationState.status === "running" ? "正在模拟生成管线"
+                  : previewRuntime.generationState.status === "complete" ? "生成管线完成"
+                    : "生成管线失败"}
+              </p>
+              <p className="text-muted-foreground">
+                dry-run · {previewRuntime.generationState.initialMessages.length} → {previewRuntime.generationState.finalMessages.length} 条消息
+                {previewRuntime.generationState.durationMs !== undefined ? ` · ${previewRuntime.generationState.durationMs.toFixed(1)} ms` : ""}
+                {previewRuntime.generationState.templateEvaluationCount > 0 ? ` · EJS ${previewRuntime.generationState.templateEvaluationCount} 条` : ""}
+              </p>
+              <p className="break-all font-mono text-[9px] text-muted-foreground">
+                {previewRuntime.generationState.eventSequence.join(" → ") || "等待事件阶段…"}
+              </p>
+              <p className="text-[10px] leading-4 text-amber-700">
+                不会请求模型或写回聊天；事件监听器会真实执行，并包含发送前的 CHAT_COMPLETION_SETTINGS_READY 预演。
+              </p>
+              {previewRuntime.generationState.message ? <p className="text-destructive">{previewRuntime.generationState.message}</p> : null}
+              {previewRuntime.generationState.truncated ? <p className="text-amber-700">结果快照过大或包含循环引用，面板中的副本已截断；脚本执行时使用的对象未截断。</p> : null}
+              {previewRuntime.generationState.finalMessages.map((message, index) => {
+                const output = generationContentText(message.content);
+                return (
+                  <details key={`${index}:${message.role}:${message.name ?? ""}`} className="rounded-md border border-border bg-surface p-2">
+                    <summary className="cursor-pointer font-medium">{index + 1}. {message.role}{message.name ? ` · ${message.name}` : ""} · {output.length.toLocaleString()} 字符</summary>
+                    <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-all text-[9px] text-muted-foreground">{output.slice(0, 8000)}{output.length > 8000 ? "\n… [仅显示前 8000 字符]" : ""}</pre>
+                  </details>
+                );
+              })}
+              <details className="rounded-md border border-border bg-surface p-2">
+                <summary className="cursor-pointer font-medium">发送设置快照</summary>
+                <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-all text-[9px] text-muted-foreground">{JSON.stringify(previewRuntime.generationState.settings, null, 2).slice(0, 12000)}</pre>
+              </details>
+            </div>
+          ) : null}
+          {previewRuntime.templateState ? (
+            <div className="space-y-1 border-t border-border pt-2">
+              <p className="font-medium">
+                Prompt Template / EJS · {previewRuntime.templateState.status === "none" ? "未检测到模板"
+                  : previewRuntime.templateState.status === "disabled" ? "检测到但未求值"
+                    : previewRuntime.templateState.status === "evaluating" ? "正在求值"
+                      : previewRuntime.templateState.status === "rendered" ? "求值完成"
+                        : "求值失败"}
+              </p>
+              <p className="text-muted-foreground">场景：{previewRuntime.templateState.phase} · {previewRuntime.templateState.path}</p>
+              {previewRuntime.templateState.durationMs !== undefined ? <p className="text-muted-foreground">耗时 {previewRuntime.templateState.durationMs.toFixed(1)} ms · {previewRuntime.templateState.inputBytes ?? 0} → {previewRuntime.templateState.outputBytes ?? 0} bytes</p> : null}
+              {previewRuntime.templateState.message ? <p className={previewRuntime.templateState.status === "error" ? "text-destructive" : "text-amber-700"}>{previewRuntime.templateState.message}{previewRuntime.templateState.line ? `（第 ${previewRuntime.templateState.line} 行）` : ""}</p> : null}
+            </div>
+          ) : null}
+          {previewRuntime.regexResult ? (
+            <div className="space-y-2 border-t border-border pt-2">
+              <p className="font-medium">正则结果 · {previewRuntime.regexResult.totalMatches} 次命中 · {previewRuntime.regexResult.stages.length} 个阶段</p>
+              {previewRuntime.regexResult.diagnostics.map((diagnostic) => <p key={`${diagnostic.ruleUid}:${diagnostic.message}`} className={diagnostic.severity === "error" ? "text-destructive" : "text-amber-700"}>{diagnostic.ruleName}：{diagnostic.message}</p>)}
+              {previewRuntime.regexResult.stages.map((stage) => (
+                <details key={stage.uid} className="rounded-md border border-border bg-surface p-2">
+                  <summary className="cursor-pointer font-medium">{stage.index + 1}. {stage.name} · {stage.matches} 次 · {stage.durationMs.toFixed(1)} ms</summary>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[9px] text-muted-foreground">{stage.output.slice(0, 4000)}{stage.output.length > 4000 ? "\n… [仅显示前 4000 字符]" : ""}</pre>
+                </details>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {canRenderStatic || runtimeActive ? (
         <div className="mt-3 flex min-h-[420px] flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-xs">
           <div className="flex flex-wrap items-center gap-2 border-b border-border bg-white/95 p-2">
             <div
@@ -343,19 +704,23 @@ function StaticFilePreview({ path, content }: { path: string; content: string })
                 height: selectedDevice.height * renderedScale,
               }}
             >
-              <iframe
-                title={`${path} 静态预览`}
-                sandbox=""
-                referrerPolicy="no-referrer"
-                srcDoc={srcDoc}
-                className="block border-0 bg-white"
-                style={{
-                  width: selectedDevice.width,
-                  height: selectedDevice.height,
-                  transform: `scale(${renderedScale})`,
-                  transformOrigin: "top left",
-                }}
-              />
+              {runtimeActive ? (
+                <div ref={runtimeMountRef} className="h-full w-full bg-white" />
+              ) : (
+                <iframe
+                  title={`${path} 静态预览`}
+                  sandbox=""
+                  referrerPolicy="no-referrer"
+                  srcDoc={srcDoc}
+                  className="block border-0 bg-white"
+                  style={{
+                    width: selectedDevice.width,
+                    height: selectedDevice.height,
+                    transform: `scale(${renderedScale})`,
+                    transformOrigin: "top left",
+                  }}
+                />
+              )}
             </div>
           </div>
         </div>
@@ -371,10 +736,30 @@ function StaticFilePreview({ path, content }: { path: string; content: string })
         </div>
       )}
 
+      {showLogs ? (
+        <div className="mt-3 max-h-56 overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-2 font-mono text-[10px] text-slate-200">
+          <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-800 pb-2">
+            <span>动态预览日志与兼容状态</span>
+            <div className="flex items-center gap-2"><select className="rounded bg-slate-900 px-1 py-0.5 text-slate-300" value={logLevel} onChange={(event) => setLogLevel(event.target.value as typeof logLevel)}><option value="all">全部</option><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select><button type="button" className="text-slate-400 hover:text-white" onClick={() => void navigator.clipboard?.writeText(filteredLogs.map((entry) => `[${entry.level}] ${entry.frame.name ?? entry.frame.kind}: ${entry.message}`).join("\n"))}>复制</button><button type="button" className="text-slate-400 hover:text-white" onClick={previewRuntime?.clearLogs}>清空</button></div>
+          </div>
+          {previewRuntime && previewRuntime.scripts.length > 0 ? <div className="mb-2 space-y-1 border-b border-slate-800 pb-2">{previewRuntime.scripts.map((script) => <button type="button" key={script.id} onClick={() => onOpenPath?.(script.path)} className="flex w-full items-center justify-between gap-2 text-left text-slate-400 hover:text-white"><span className="truncate">{script.index + 1}. {script.name}</span><span className={script.status === "error" ? "text-red-300" : script.status === "running" ? "text-emerald-300" : "text-sky-300"}>{scriptProgressLabel(script)}</span></button>)}</div> : null}
+          {filteredLogs.length === 0 ? <p className="text-slate-500">暂无符合筛选条件的 console 或运行错误。</p> : null}
+          {filteredLogs.map((entry) => (
+            <div key={entry.id} className={cn("grid grid-cols-[auto_1fr] gap-2 py-0.5", entry.level === "error" && "text-red-300", entry.level === "warn" && "text-amber-300")}>
+              <span className="text-slate-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+              <span className="break-all">[{entry.level}] [{entry.frame.name ?? entry.frame.kind}] {entry.message}{entry.filename ? ` · ${entry.filename}${entry.line ? `:${entry.line}` : ""}` : ""}{entry.truncated ? " · 已截断" : ""}</span>
+            </div>
+          ))}
+          {previewRuntime && previewRuntime.capabilities.length > 0 ? <div className="mt-2 border-t border-slate-800 pt-2"><p className="mb-1 text-slate-400">Capability 使用</p>{previewRuntime.capabilities.map((usage) => <div key={`${usage.capability}:${usage.frame.id ?? usage.frame.kind}`} className={usage.supported ? "text-slate-400" : "text-amber-300"}>{usage.capability} · {usage.strategy} · {usage.count} 次 · {usage.frame.name ?? usage.frame.kind}</div>)}</div> : null}
+        </div>
+      ) : null}
+
       <div className="mt-3 flex items-start gap-2 rounded-lg border border-border bg-muted/35 p-3">
         <ShieldOff className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <p className="text-[10px] leading-4 text-muted-foreground">
-          空 sandbox 与 CSP 会阻止项目脚本、inline handler、javascript: URL、网络请求 API、子框架、表单提交和顶层导航；项目 JavaScript 仅在手动推送后由真实 ST 测试。
+          {runtimeActive
+            ? "启用的项目 content.js 与消息 HTML 在独立 Preview Origin 中执行，可联网、写入该预览源存储并产生外部副作用；停止不会撤销已经发生的外部操作。"
+            : "静态模式使用空 sandbox 与严格 CSP，会移除 script、inline handler 和 javascript: URL，不执行用户代码。"}
         </p>
       </div>
       <div className="mt-2 flex items-start gap-2 rounded-lg border border-primary/15 bg-primary-soft/35 p-3">
@@ -512,6 +897,23 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function scriptProgressLabel(script: ProjectPreviewRuntime["scripts"][number]) {
+  if (
+    script.status === "loading"
+    && typeof script.transferredBytes === "number"
+    && typeof script.byteLength === "number"
+    && script.byteLength > 0
+    && script.transferredBytes < script.byteLength
+  ) return `传输 ${Math.floor((script.transferredBytes / script.byteLength) * 100)}%`;
+  return script.status;
+}
+
+function generationContentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2); }
+  catch { return String(value); }
 }
 
 function saveLabel(state: SaveState, saveMode: "auto" | "explicit") {
