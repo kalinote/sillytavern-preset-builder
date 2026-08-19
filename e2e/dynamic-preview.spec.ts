@@ -375,6 +375,19 @@ test("isolated Preview Host covers chunking, compatibility, message HTML, storag
       }
     });
     await openPreview(page);
+    for (const pluginId of ["core", "spreset", "regex", "tavern-helper", "extension:unmapped_plugin"]) {
+      await expect(page.locator(`button[data-plugin-id="${pluginId}"]`)).toBeVisible();
+    }
+    await expect(page.locator('button[data-tree-path="spreset/config"]')).toBeVisible();
+    await expect(page.locator('button[data-tree-path="regex/regex"]')).toBeVisible();
+    await expect(page.locator('button[data-tree-path="tavern-helper/scripts"]')).toBeVisible();
+    await expect(page.locator('button[aria-label^="新建 "]')).toHaveCount(0);
+    const regexItemDirectory = page.locator('button[data-tree-path^="regex/regex/"]').first();
+    await regexItemDirectory.click();
+    const replacementFile = page.locator('button[data-source-path$="/replace.html"]').first();
+    await replacementFile.click();
+    await expect(page.locator("main").first().getByText("replace.html", { exact: true })).toBeVisible();
+    await regexItemDirectory.click();
     await expect(page.getByTestId("regex-mirror-status")).toContainText("extensions.regex_scripts");
     await expect(page.getByTestId("regex-mirror-status")).toContainText("镜像一致");
     const runtimeFrame = page.locator('iframe[title="项目动态 JavaScript 预览"]');
@@ -626,7 +639,7 @@ test("20 restarts keep preview frames, DOM, and heap within a bounded envelope",
   test.setTimeout(180_000);
   await importFixture(request, true, memoryPresetFixture());
   await openPreview(page);
-  await page.getByRole("button", { name: "project.json", exact: true }).click();
+  await page.locator('button[data-source-path="project.json"]').click();
   const runtimeFrame = page.locator('iframe[title="项目动态 JavaScript 预览"]');
   const studioSession = await context.newCDPSession(page);
   const samples: MemorySample[] = [];

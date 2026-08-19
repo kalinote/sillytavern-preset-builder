@@ -22,10 +22,7 @@ import {
   WorkspaceEditorPane,
   type SaveState,
 } from "./components/workspace/workspace-editor-pane";
-import {
-  WorkspaceFileExplorer,
-  type ExplorerFile,
-} from "./components/workspace/workspace-file-explorer";
+import { WorkspaceFileExplorer } from "./components/workspace/workspace-file-explorer";
 import { WorkspaceInspector } from "./components/workspace/workspace-inspector";
 import { WorkspaceInspectorDrawer } from "./components/workspace/workspace-inspector-drawer";
 import { ResizableSidebar } from "./components/workspace/resizable-sidebar";
@@ -43,6 +40,7 @@ import { useProjectWorkspace } from "./hooks/use-project-workspace";
 import { useStConnection } from "./hooks/use-st-connection";
 import { runSafely } from "./lib/async";
 import type { ProjectExportResult, StructureMutation } from "./lib/project-api";
+import { buildProjectResourceCatalog } from "./lib/project-resource-catalog";
 import { useProjectPreviewRuntime } from "./preview/use-project-preview-runtime";
 
 export default function App() {
@@ -332,18 +330,9 @@ export default function App() {
     workspace.activeFile?.size ?? new TextEncoder().encode(activeContent).length;
   const activeLineCount = useDebouncedLineCount(activeContent);
   const diagnosticsBlocking = workspace.diagnostics.some((item) => item.severity === "error");
-  const explorerFiles = useMemo<ExplorerFile[]>(
-    () =>
-      workspace.files.map((file) => ({
-        path: file.path,
-        type: file.kind,
-        size: file.size ?? 0,
-        updatedAt: file.updatedAt ?? undefined,
-        displayName: file.displayName,
-        order: file.order,
-        role: file.role,
-      })),
-    [workspace.files],
+  const explorerFiles = useMemo(
+    () => buildProjectResourceCatalog(workspace.files, workspace.structure),
+    [workspace.files, workspace.structure],
   );
   const showProjectManager = useCallback(() => {
     setProjectDialogOpen(true);
@@ -441,9 +430,6 @@ export default function App() {
                     activePath={activePath}
                     onSelect={handleDesktopFileSelect}
                     onOpenProjects={openProjectManager}
-                    structure={workspace.structure}
-                    structureBusy={workspace.structureMutation === "saving" || operationBusy}
-                    onMutate={handleStructureMutation}
                     onOpenSettings={() => setSettingsDialogOpen(true)}
                   />
                 </ResizableSidebar>
@@ -578,9 +564,6 @@ export default function App() {
                     activePath={activePath}
                     onSelect={handleMobileFileSelect}
                     onOpenProjects={openProjectManager}
-                    structure={workspace.structure}
-                    structureBusy={workspace.structureMutation === "saving" || operationBusy}
-                    onMutate={handleStructureMutation}
                     onOpenSettings={() => setSettingsDialogOpen(true)}
                   />
                 </div>

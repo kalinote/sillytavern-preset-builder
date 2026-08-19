@@ -500,6 +500,16 @@ test("schema v2 structure mutations preserve unknown fields and enforce prompt r
     assert.equal(structure.prompts.length, 3);
     assert.equal(structure.regex.length, 1);
     assert.equal(structure.scripts.length, 1);
+    assert.deepEqual(structure.plugins.map((plugin) => ({
+      id: plugin.id,
+      extensionKey: plugin.extensionKey,
+      known: plugin.known,
+    })), [
+      { id: "extension:unknown_extension", extensionKey: "unknown_extension", known: false },
+      { id: "regex", extensionKey: "regex_scripts", known: true },
+      { id: "spreset", extensionKey: "SPreset", known: true },
+      { id: "tavern-helper", extensionKey: "tavern_helper", known: true },
+    ]);
 
     const duplicated = await store.mutateProjectStructure(manifest.id, {
       ifRevision: structure.revision,

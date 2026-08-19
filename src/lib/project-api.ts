@@ -154,6 +154,14 @@ export interface ScriptStructureItem {
   enabled?: boolean;
 }
 
+export interface ProjectPluginSummary {
+  id: string;
+  displayName: string;
+  extensionKey: string;
+  known: boolean;
+  configSourcePath: "preset.base.json";
+}
+
 export interface ProjectStructure {
   projectId: string;
   projectRevision: string;
@@ -161,6 +169,7 @@ export interface ProjectStructure {
   prompts: PromptStructureItem[];
   regex: RegexStructureItem[];
   scripts: ScriptStructureItem[];
+  plugins: ProjectPluginSummary[];
   promptOrder: JsonValue[];
 }
 
@@ -836,6 +845,23 @@ function parseProjectStructure(value: unknown): ProjectStructure {
     prompts: value.prompts.map((item) => parseStructureItem(item, "prompt")),
     regex: value.regex.map((item) => parseStructureItem(item, "regex")),
     scripts: value.scripts.map((item) => parseStructureItem(item, "script")),
+    plugins: Array.isArray(value.plugins)
+      ? value.plugins.flatMap((plugin): ProjectPluginSummary[] => {
+        if (
+          !isRecord(plugin)
+          || typeof plugin.id !== "string"
+          || typeof plugin.displayName !== "string"
+          || typeof plugin.extensionKey !== "string"
+        ) return [];
+        return [{
+          id: plugin.id,
+          displayName: plugin.displayName,
+          extensionKey: plugin.extensionKey,
+          known: plugin.known === true,
+          configSourcePath: "preset.base.json",
+        }];
+      })
+      : [],
     promptOrder: Array.isArray(value.promptOrder) ? value.promptOrder as JsonValue[] : [],
   };
 }

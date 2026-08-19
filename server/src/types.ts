@@ -188,6 +188,14 @@ export interface ScriptStructureItem {
   enabled?: boolean;
 }
 
+export interface ProjectPluginSummary {
+  id: string;
+  displayName: string;
+  extensionKey: string;
+  known: boolean;
+  configSourcePath: "preset.base.json";
+}
+
 export interface ProjectStructure {
   projectId: string;
   projectRevision: string;
@@ -195,6 +203,7 @@ export interface ProjectStructure {
   prompts: PromptStructureItem[];
   regex: RegexStructureItem[];
   scripts: ScriptStructureItem[];
+  plugins: ProjectPluginSummary[];
   promptOrder: JsonValue[];
 }
 

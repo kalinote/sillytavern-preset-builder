@@ -31,6 +31,22 @@ function optionalString(value: JsonValue | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function pluginSummary(extensionKey: string) {
+  const known = {
+    SPreset: { id: "spreset", displayName: "SPreset" },
+    regex_scripts: { id: "regex", displayName: "Regex" },
+    tavern_helper: { id: "tavern-helper", displayName: "Tavern Helper" },
+    prompt_template: { id: "prompt-template", displayName: "Prompt Template" },
+  }[extensionKey];
+  return {
+    id: known?.id ?? `extension:${encodeURIComponent(extensionKey)}`,
+    displayName: known?.displayName ?? extensionKey,
+    extensionKey,
+    known: known !== undefined,
+    configSourcePath: "preset.base.json" as const,
+  };
+}
+
 function assertUid(uid: string): string {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uid)) {
     throw new ApiError(422, "INVALID_PROJECT_INDEX", "Project item index contains an invalid uid");
@@ -140,6 +156,8 @@ export async function readProjectStructure(
       };
     })),
   ]);
+  const extensions = isJsonObject(build.preset.extensions) ? build.preset.extensions : {};
+  const plugins = Object.keys(extensions).map(pluginSummary);
 
   return {
     projectId: manifest.id,
@@ -148,6 +166,7 @@ export async function readProjectStructure(
     prompts,
     regex,
     scripts,
+    plugins,
     promptOrder: cloneJson(promptOrder),
   };
 }
