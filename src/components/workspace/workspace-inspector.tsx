@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
-import type { ProjectDiagnostic, ProjectStructure, StructureMutation } from "../../lib/project-api";
+import type { ProjectDiagnostic, ProjectStructure, RegexMirrorBinding, StructureMutation } from "../../lib/project-api";
 import type { ProjectPreviewRuntime } from "../../preview/use-project-preview-runtime";
 import type { SaveState } from "./workspace-editor-pane";
 import { cn } from "../../lib/utils";
@@ -58,6 +58,7 @@ interface WorkspaceInspectorProps {
   javascriptSettingsBusy?: boolean;
   previewOrigin?: string;
   previewRuntime?: ProjectPreviewRuntime;
+  regexMirrorBinding?: RegexMirrorBinding;
   onJavascriptEnabledChange?: (enabled: boolean) => void;
 }
 
@@ -84,6 +85,7 @@ export function WorkspaceInspector({
   javascriptSettingsBusy,
   previewOrigin,
   previewRuntime,
+  regexMirrorBinding,
   onJavascriptEnabledChange,
 }: WorkspaceInspectorProps) {
   const hasItem = Boolean(structure && /^(prompts|regex|scripts)\/[^/]+\//.test(path));
@@ -195,6 +197,7 @@ export function WorkspaceInspector({
             javascriptSettingsBusy={javascriptSettingsBusy}
             previewOrigin={previewOrigin}
             previewRuntime={previewRuntime}
+            regexMirrorBinding={regexMirrorBinding}
             onJavascriptEnabledChange={onJavascriptEnabledChange}
             onOpenPath={onOpenPath}
           />
@@ -246,6 +249,7 @@ function StaticFilePreview({
   javascriptSettingsBusy,
   previewOrigin,
   previewRuntime,
+  regexMirrorBinding,
   onJavascriptEnabledChange,
   onOpenPath,
 }: {
@@ -255,6 +259,7 @@ function StaticFilePreview({
   javascriptSettingsBusy?: boolean;
   previewOrigin?: string;
   previewRuntime?: ProjectPreviewRuntime;
+  regexMirrorBinding?: RegexMirrorBinding;
   onJavascriptEnabledChange?: (enabled: boolean) => void;
   onOpenPath?: (path: string) => void;
 }) {
@@ -395,6 +400,33 @@ function StaticFilePreview({
           </Badge>
         </div>
       </div>
+
+      {regexMirrorBinding ? (
+        <div
+          className={cn(
+            "mt-3 rounded-xl border p-2.5 text-[11px]",
+            regexMirrorBinding.consistent
+              ? "border-primary/20 bg-primary-soft/35"
+              : "border-amber-300/70 bg-amber-50/70 text-amber-950",
+          )}
+          data-testid="regex-mirror-status"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">正则来源</span>
+            <code className="rounded bg-surface/75 px-1.5 py-0.5 text-[10px]">
+              {regexMirrorBinding.authority}
+            </code>
+            <Badge variant={regexMirrorBinding.consistent ? "green" : "amber"}>
+              {regexMirrorBinding.consistent ? "镜像一致" : "镜像存在差异"}
+            </Badge>
+          </div>
+          <p className="mt-1 leading-4 opacity-80">
+            {regexMirrorBinding.consistent
+              ? `编辑会同步回写 ${regexMirrorBinding.targets.length} 个已关联来源。`
+              : "当前编辑只回写上述主来源；其他插件镜像保留原值。"}
+          </p>
+        </div>
+      ) : null}
 
       <div className="mt-3 rounded-xl border border-border bg-muted/25 p-2.5">
         <div className="flex flex-wrap items-center gap-2">

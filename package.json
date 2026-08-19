@@ -15,7 +15,6 @@
     "start": "pnpm --dir server start",
     "test": "pnpm --dir server test",
     "test:e2e": "pnpm build && playwright test && playwright test --config=playwright.strict.config.ts",
-    "test:e2e:full-sample": "pnpm build && playwright test --config=playwright.full-sample.config.ts",
     "test:e2e:chromium": "pnpm build && playwright test --project=chromium",
     "test:e2e:strict": "playwright test --config=playwright.strict.config.ts",
     "test:e2e:install": "playwright install chromium firefox webkit",

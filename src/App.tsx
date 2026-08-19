@@ -499,6 +499,7 @@ export default function App() {
                     javascriptSettingsBusy={operationBusy}
                     previewOrigin={previewOrigin}
                     previewRuntime={previewRuntime}
+                    regexMirrorBinding={workspace.project.regexMirrorBinding}
                     onJavascriptEnabledChange={handleJavascriptEnabledChange}
                   />
                 </ResizableSidebar>
@@ -560,6 +561,7 @@ export default function App() {
                     javascriptSettingsBusy={operationBusy}
                     previewOrigin={previewOrigin}
                     previewRuntime={previewRuntime}
+                    regexMirrorBinding={workspace.project.regexMirrorBinding}
                     onJavascriptEnabledChange={handleJavascriptEnabledChange}
                   />
                 </>
@@ -626,6 +628,7 @@ export default function App() {
                   javascriptSettingsBusy={operationBusy}
                   previewOrigin={previewOrigin}
                   previewRuntime={previewRuntime}
+                  regexMirrorBinding={workspace.project.regexMirrorBinding}
                   onJavascriptEnabledChange={handleJavascriptEnabledChange}
                 />
               )}

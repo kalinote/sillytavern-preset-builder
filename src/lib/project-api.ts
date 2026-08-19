@@ -28,10 +28,18 @@ export interface Project extends ProjectSummary {
   originalHash?: string | null;
   buildRulesVersion?: string | number;
   preview: ProjectPreviewSettings;
+  regexMirrorBinding?: RegexMirrorBinding;
 }
 
 export interface ProjectPreviewSettings {
   javascriptEnabled: boolean;
+}
+
+export interface RegexMirrorBinding {
+  authority: string;
+  targets: string[];
+  consistent: boolean;
+  promptIdentifier?: string;
 }
 
 export interface PreviewRuntimeScript {
@@ -513,6 +521,23 @@ function unwrap(payload: unknown, key: string) {
   return isRecord(payload) && key in payload ? payload[key] : payload;
 }
 
+function parseRegexMirrorBinding(value: unknown): RegexMirrorBinding | undefined {
+  if (
+    !isRecord(value)
+    || typeof value.authority !== "string"
+    || !Array.isArray(value.targets)
+    || !value.targets.every((target) => typeof target === "string")
+    || typeof value.consistent !== "boolean"
+  ) return undefined;
+
+  return {
+    authority: value.authority,
+    targets: value.targets,
+    consistent: value.consistent,
+    ...(typeof value.promptIdentifier === "string" ? { promptIdentifier: value.promptIdentifier } : {}),
+  };
+}
+
 function parseProject(value: unknown): Project {
   if (!isRecord(value)) throw new TypeError("Project response must be an object");
 
@@ -520,6 +545,7 @@ function parseProject(value: unknown): Project {
   const buildRulesVersion = value.buildRulesVersion;
   const sourceRecord = isRecord(value.source) ? value.source : null;
   const previewRecord = isRecord(value.preview) ? value.preview : null;
+  const regexMirrorBinding = parseRegexMirrorBinding(value.regexMirrorBinding);
   const source =
     typeof value.source === "string"
       ? value.source
@@ -551,6 +577,7 @@ function parseProject(value: unknown): Project {
     preview: {
       javascriptEnabled: previewRecord?.javascriptEnabled === true,
     },
+    ...(regexMirrorBinding ? { regexMirrorBinding } : {}),
   };
 }
 

@@ -83,6 +83,20 @@ function fixturePreset(): JsonObject {
   };
 }
 
+function conflictingRegexPreset(): JsonObject {
+  const preset = fixturePreset();
+  const extensions = preset.extensions as JsonObject;
+  const spreset = extensions.SPreset as JsonObject;
+  const regexBinding = spreset.RegexBinding as JsonObject;
+  const spresetRegexes = regexBinding.regexes as JsonObject[];
+  spresetRegexes[0]!.replaceString = "<aside class=\"legacy-card\">$1</aside>";
+  const settingsPrompt = (preset.prompts as JsonObject[])
+    .find((prompt) => prompt.identifier === "SPresetSettings");
+  assert(settingsPrompt);
+  settingsPrompt.content = JSON.stringify(spreset);
+  return preset;
+}
+
 async function withStore(run: (store: ProjectStore, root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "preset-studio-store-"));
   try {
@@ -120,6 +134,67 @@ test("import splits and rebuilds a preset with deep semantic equality", async ()
     assert(files.some((entry) => entry.path.endsWith("/content.md")));
     assert(files.some((entry) => entry.path.endsWith("/replace.html")));
     assert(files.some((entry) => entry.path.endsWith("/content.js")));
+  });
+});
+
+test("conflicting Regex mirrors split the primary source and only write edits back to it", async () => {
+  await withStore(async (store, root) => {
+    const preset = conflictingRegexPreset();
+    const manifest = await store.importProject({ name: "Conflicting Regex mirrors", preset });
+
+    assert.equal(manifest.managedPaths.regex, true);
+    assert.equal(manifest.regexMirrorBinding?.authority, "extensions.regex_scripts");
+    assert.equal(manifest.regexMirrorBinding?.consistent, false);
+    assert.deepEqual(manifest.regexMirrorBinding?.targets, [
+      "extensions.regex_scripts",
+      "extensions.SPreset.RegexBinding.regexes",
+      "prompts[1].content.RegexBinding.regexes",
+    ]);
+
+    const structure = await store.getProjectStructure(manifest.id);
+    assert.equal(structure.regex.length, 1);
+    const runtime = await store.getPreviewRuntimeManifest(manifest.id);
+    assert.equal(runtime.regexScripts.length, 1);
+    assert.equal(runtime.scripts.length, 1);
+
+    const base = JSON.parse(await readFile(join(root, manifest.id, "preset.base.json"), "utf8")) as JsonObject;
+    const baseExtensions = base.extensions as JsonObject;
+    assert.deepEqual(baseExtensions.regex_scripts, []);
+    assert.equal(
+      ((((baseExtensions.SPreset as JsonObject).RegexBinding as JsonObject).regexes as JsonObject[])[0]?.replaceString),
+      "<aside class=\"legacy-card\">$1</aside>",
+    );
+
+    const untouched = await store.buildProject(manifest.id);
+    assert.deepEqual(untouched.preset, preset);
+    assert.deepEqual(untouched.diagnostics.map((diagnostic) => diagnostic.code), [
+      "REGEX_MIRROR_CONFLICT_PRESERVED",
+    ]);
+
+    const regexItem = structure.regex[0];
+    assert(regexItem);
+    const replacePath = `regex/${regexItem.uid}/replace.html`;
+    const before = await store.readProjectFile(manifest.id, replacePath);
+    await store.saveProjectFile(manifest.id, replacePath, {
+      content: "<article class=\"edited-card\">$1</article>",
+      ifRevision: before.revision,
+    });
+
+    const edited = await store.buildProject(manifest.id);
+    const editedExtensions = edited.preset.extensions as JsonObject;
+    assert.equal(
+      (editedExtensions.regex_scripts as JsonObject[])[0]?.replaceString,
+      "<article class=\"edited-card\">$1</article>",
+    );
+    assert.equal(
+      (((editedExtensions.SPreset as JsonObject).RegexBinding as JsonObject).regexes as JsonObject[])[0]?.replaceString,
+      "<aside class=\"legacy-card\">$1</aside>",
+    );
+    const editedSettings = (edited.preset.prompts as JsonObject[])
+      .find((prompt) => prompt.identifier === "SPresetSettings");
+    const originalSettings = (preset.prompts as JsonObject[])
+      .find((prompt) => prompt.identifier === "SPresetSettings");
+    assert.equal(editedSettings?.content, originalSettings?.content);
   });
 });
 

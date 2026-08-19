@@ -154,6 +154,7 @@ export function renderPreviewRuntimeDocument(allowedParentOrigins: readonly stri
       regex: [],
       preset_allowed_regex: { openai: [] },
       SPreset: { RegexBinding: {} },
+      tavern_helper: { variables: {} },
     };
     let channelPort;
     let sessionNonce = "";
@@ -193,6 +194,39 @@ export function renderPreviewRuntimeDocument(allowedParentOrigins: readonly stri
           : clone(value);
       }
       return output;
+    }
+
+    function isRecordValue(value) {
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    }
+
+    function replaceObjectContents(target, source) {
+      for (const key of Object.keys(target)) delete target[key];
+      Object.assign(target, clone(isRecordValue(source) ? source : {}));
+      return target;
+    }
+
+    function hydrateExtensionSettings() {
+      const extensions = isRecordValue(state.preset?.extensions) ? state.preset.extensions : {};
+      const spresetSource = isRecordValue(extensions.SPreset)
+        ? extensions.SPreset
+        : { RegexBinding: {} };
+      if (!isRecordValue(extensionSettings.SPreset)) extensionSettings.SPreset = {};
+      replaceObjectContents(extensionSettings.SPreset, spresetSource);
+
+      extensionSettings.regex = state.regexScripts;
+      if (!isRecordValue(extensionSettings.preset_allowed_regex)) {
+        extensionSettings.preset_allowed_regex = {};
+      }
+      extensionSettings.preset_allowed_regex.openai = state.regexScripts;
+
+      const helperSource = isRecordValue(extensions.tavern_helper) ? extensions.tavern_helper : {};
+      const variablesSource = isRecordValue(helperSource.variables) ? helperSource.variables : {};
+      if (!isRecordValue(extensionSettings.tavern_helper)) extensionSettings.tavern_helper = {};
+      if (!isRecordValue(extensionSettings.tavern_helper.variables)) {
+        extensionSettings.tavern_helper.variables = {};
+      }
+      replaceObjectContents(extensionSettings.tavern_helper.variables, variablesSource);
     }
 
     function report(type, payload = {}) {
@@ -321,9 +355,11 @@ export function renderPreviewRuntimeDocument(allowedParentOrigins: readonly stri
         get: () => state.regexScripts,
         set: (next) => {
           state.regexScripts = clone(Array.isArray(next) ? next : []);
+          hydrateExtensionSettings();
           recordCapability(hostFrame, "preset.regex.sync", true, "memory");
         },
       });
+      hydrateExtensionSettings();
     }
 
     function notifyStateChanged() {
@@ -818,6 +854,7 @@ export function renderPreviewRuntimeDocument(allowedParentOrigins: readonly stri
         replaceTavernRegexes(next) {
           recordCapability(frame, "regex.write", true, "memory");
           state.regexScripts = clone(Array.isArray(next) ? next : []);
+          hydrateExtensionSettings();
           notifyStateChanged();
           return clone(state.regexScripts);
         },

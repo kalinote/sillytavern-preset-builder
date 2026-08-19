@@ -183,8 +183,9 @@ function presetFixture(webSocketUrl?: string) {
     extensions: {
       regex_scripts: [structuredClone(regexBindingFixture)],
       SPreset: { RegexBinding: { regexes: [structuredClone(regexBindingFixture)] } },
+      unmapped_plugin: { secret: true },
       tavern_helper: {
-        variables: {},
+        variables: { fixtureFlag: "loaded" },
         scripts: [
           {
             type: "script",
@@ -201,6 +202,8 @@ function presetFixture(webSocketUrl?: string) {
             enabled: true,
             content: String.raw`
 const regexBindingContext = SillyTavern.getContext();
+const extensionSettingsReference = regexBindingContext.extensionSettings;
+const spresetSettingsReference = regexBindingContext.extensionSettings.SPreset;
 const boundRegexes = regexBindingContext.chatCompletionSettings.extensions.SPreset.RegexBinding.regexes;
 regexBindingContext.chatCompletionSettings.extensions.regex_scripts = boundRegexes;
 const promptCountBeforePatch = regexBindingContext.chatCompletionSettings.prompts.length;
@@ -216,6 +219,12 @@ console.log(
   TavernHelper.getTavernRegexes().length,
   presetChangedEvents,
   Array.isArray(regexBindingContext.extensionSettings.regex),
+  regexBindingContext.extensionSettings.SPreset.RegexBinding.regexes.length,
+  regexBindingContext.extensionSettings.tavern_helper.variables.fixtureFlag,
+  regexBindingContext.extensionSettings === extensionSettingsReference,
+  regexBindingContext.extensionSettings.SPreset === spresetSettingsReference,
+  regexBindingContext.extensionSettings.unmapped_plugin === undefined
+    && regexBindingContext.chatCompletionSettings.extensions.unmapped_plugin.secret === true,
   regexBindingContext.chatCompletionSettings.prompts.length === promptCountBeforePatch,
   regexBindingContext.chatCompletionSettings.settings.allow_sending_images,
 );
@@ -366,6 +375,8 @@ test("isolated Preview Host covers chunking, compatibility, message HTML, storag
       }
     });
     await openPreview(page);
+    await expect(page.getByTestId("regex-mirror-status")).toContainText("extensions.regex_scripts");
+    await expect(page.getByTestId("regex-mirror-status")).toContainText("镜像一致");
     const runtimeFrame = page.locator('iframe[title="项目动态 JavaScript 预览"]');
     await expect(runtimeFrame).toHaveCount(0);
     await page.getByRole("button", { name: "启动", exact: true }).click();
@@ -388,7 +399,7 @@ test("isolated Preview Host covers chunking, compatibility, message HTML, storag
   expect(previewStudioApiCookies.every((cookie) => cookie.length === 0)).toBe(true);
   await expect(page.getByText(/E2E_DYNAMIC_IMPORT 42/)).toHaveCount(1);
   await expect(page.getByText(/E2E_VARIABLE_SCOPES global chat message/)).toHaveCount(1);
-  await expect(page.getByText(/E2E_REGEX_BINDING main Playwright dynamic preview \d+ 1 1 true true auto/)).toHaveCount(1);
+  await expect(page.getByText(/E2E_REGEX_BINDING main Playwright dynamic preview \d+ 1 1 true 1 loaded true true true true auto/)).toHaveCount(1);
   await expect(page.getByText(/E2E_MESSAGE_CRUD updated 1/)).toHaveCount(1);
   await expect(page.getByText(/E2E_MESSAGE_DELETE 0/)).toHaveCount(1);
   await expect(page.getByText(/E2E_CAPABILITY_STUB PreviewCapabilityError generate/)).toHaveCount(1);

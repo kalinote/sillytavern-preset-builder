@@ -98,7 +98,7 @@ function detectRegexMirrors(preset: JsonObject): RegexDetection | undefined {
   const consistent = candidates.every((candidate) => semanticEqual(authority.value, candidate.value));
   if (!consistent) {
     return {
-      regexes: [],
+      regexes: cloneJson(authority.value),
       binding: {
         authority: authority.target,
         targets: candidates.map((candidate) => candidate.target),
@@ -151,7 +151,10 @@ function makeManifest(
     managedPaths: {
       prompts: true,
       promptOrder: true,
-      regex: Boolean(regexDetection?.binding.consistent),
+      regex: Boolean(
+        regexDetection &&
+        (regexDetection.binding.consistent || regexDetection.binding.authority === "extensions.regex_scripts"),
+      ),
       scripts: Array.isArray(getAtPath(original, ["extensions", "tavern_helper", "scripts"])),
     },
     preview: {
@@ -299,11 +302,17 @@ export async function splitPresetProject(
   delete base.prompts;
   delete base.prompt_order;
 
-  if (regexDetection?.binding.consistent) {
+  if (manifest.managedPaths.regex && regexDetection?.binding.consistent) {
     const extensions = base.extensions;
     if (isJsonObject(extensions) && Array.isArray(extensions.regex_scripts)) extensions.regex_scripts = [];
     const binding = getAtPath(base, ["extensions", "SPreset", "RegexBinding"]);
     if (isJsonObject(binding) && Array.isArray(binding.regexes)) binding.regexes = [];
+  } else if (
+    manifest.managedPaths.regex &&
+    regexDetection?.binding.authority === "extensions.regex_scripts"
+  ) {
+    const extensions = base.extensions;
+    if (isJsonObject(extensions) && Array.isArray(extensions.regex_scripts)) extensions.regex_scripts = [];
   }
   if (manifest.managedPaths.scripts) {
     const helper = getAtPath(base, ["extensions", "tavern_helper"]);

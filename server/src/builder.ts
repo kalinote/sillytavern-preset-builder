@@ -122,7 +122,12 @@ function installRegexMirrors(
   regexes: JsonValue[],
   diagnostics: Diagnostic[],
 ): void {
-  const targets = manifest.regexMirrorBinding?.targets ?? [];
+  const mirrorBinding = manifest.regexMirrorBinding;
+  const targets = mirrorBinding?.consistent
+    ? mirrorBinding.targets
+    : mirrorBinding
+      ? [mirrorBinding.authority]
+      : [];
   if (targets.includes("extensions.regex_scripts")) {
     const extensions = preset.extensions;
     if (isJsonObject(extensions)) extensions.regex_scripts = cloneJson(regexes);
@@ -132,7 +137,7 @@ function installRegexMirrors(
     if (isJsonObject(binding)) binding.regexes = cloneJson(regexes);
   }
 
-  const promptIdentifier = manifest.regexMirrorBinding?.promptIdentifier;
+  const promptIdentifier = mirrorBinding?.consistent ? mirrorBinding.promptIdentifier : undefined;
   if (promptIdentifier) {
     const prompt = prompts.find((candidate) => isJsonObject(candidate) && candidate.identifier === promptIdentifier);
     const spreset = getAtPath(preset, ["extensions", "SPreset"]);
@@ -238,16 +243,19 @@ export async function buildPresetProject(projectRoot: string): Promise<BuildResu
   }
 
   if (manifest.managedPaths.regex) {
-    if (!manifest.regexMirrorBinding?.consistent) {
-      throw new ApiError(422, "REGEX_MIRROR_CONFLICT", "Regex mirrors are marked as conflicting");
+    if (!manifest.regexMirrorBinding) {
+      throw new ApiError(422, "REGEX_MIRROR_BINDING_MISSING", "Managed Regex files have no write-back binding");
     }
     const regexes = await buildRegex(projectRoot);
     installRegexMirrors(preset, prompts, manifest, regexes, diagnostics);
-  } else if (manifest.regexMirrorBinding && !manifest.regexMirrorBinding.consistent) {
+  }
+  if (manifest.regexMirrorBinding && !manifest.regexMirrorBinding.consistent) {
     diagnostics.push({
       level: "warning",
       code: "REGEX_MIRROR_CONFLICT_PRESERVED",
-      message: "Conflicting Regex mirrors were preserved in preset.base.json and are not linked",
+      message: manifest.managedPaths.regex
+        ? `Conflicting Regex mirrors were preserved; edits only update ${manifest.regexMirrorBinding.authority}`
+        : "Conflicting Regex mirrors were preserved in preset.base.json and are not linked",
     });
   }
 
