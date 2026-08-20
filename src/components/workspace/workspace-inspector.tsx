@@ -3,12 +3,15 @@ import {
   Code2,
   Eye,
   FileText,
+  Focus,
   Globe2,
+  Hand,
   Info,
   ListChecks,
   Bug,
   AlertTriangle,
   Maximize2,
+  Minimize2,
   Monitor,
   RefreshCw,
   Play,
@@ -22,7 +25,16 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+  type WheelEvent as ReactWheelEvent,
+} from "react";
 
 import type { ProjectDiagnostic, ProjectStructure, RegexMirrorBinding, StructureMutation } from "../../lib/project-api";
 import type { ProjectPreviewRuntime } from "../../preview/use-project-preview-runtime";
@@ -209,8 +221,9 @@ export function WorkspaceInspector({
 
 const PREVIEW_DEBOUNCE_MS = 320;
 const MIN_PREVIEW_SCALE = 0.2;
-const MAX_PREVIEW_SCALE = 1.5;
+const MAX_PREVIEW_SCALE = 2;
 const PREVIEW_SCALE_STEP = 0.1;
+const PREVIEW_STAGE_PADDING = 24;
 
 const PREVIEW_CSP = [
   "default-src 'none'",
@@ -234,6 +247,18 @@ interface PreviewDevice {
   width: number;
   height: number;
   icon: typeof Monitor;
+}
+
+interface PreviewZoomAnchor {
+  clientX: number;
+  clientY: number;
+  canvasX: number;
+  canvasY: number;
+}
+
+interface PreviewPointerPosition {
+  x: number;
+  y: number;
 }
 
 const PREVIEW_DEVICES: readonly PreviewDevice[] = [
@@ -266,6 +291,9 @@ function StaticFilePreview({
   const [deviceId, setDeviceId] = useState<PreviewDevice["id"]>("desktop");
   const [fitToContainer, setFitToContainer] = useState(true);
   const [manualScale, setManualScale] = useState(0.75);
+  const [panMode, setPanMode] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [canvasExpanded, setCanvasExpanded] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showContext, setShowContext] = useState(false);
   const [storageBusy, setStorageBusy] = useState(false);
@@ -273,7 +301,20 @@ function StaticFilePreview({
   const [variablesDraft, setVariablesDraft] = useState("{}");
   const [contextError, setContextError] = useState<string>();
   const stageRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const runtimeMountRef = useRef<HTMLDivElement>(null);
+  const scaleRef = useRef(manualScale);
+  const zoomAnchorRef = useRef<PreviewZoomAnchor | null>(null);
+  const recenterCanvasRef = useRef(true);
+  const activePointersRef = useRef(new Map<number, PreviewPointerPosition>());
+  const panStartRef = useRef<{
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
+  const pinchStartRef = useRef<{ distance: number; scale: number } | null>(null);
   const stageWidth = useObservedWidth(stageRef);
   const previewContent = useDebouncedValue(content, PREVIEW_DEBOUNCE_MS);
   const extension = path.split(".").at(-1)?.toLowerCase();
@@ -306,7 +347,11 @@ function StaticFilePreview({
   const selectedDevice =
     PREVIEW_DEVICES.find((device) => device.id === deviceId) ?? PREVIEW_DEVICES[0];
   const fitScale = stageWidth
-    ? clamp((stageWidth - 24) / selectedDevice.width, MIN_PREVIEW_SCALE, 1)
+    ? clamp(
+      (stageWidth - PREVIEW_STAGE_PADDING * 2) / selectedDevice.width,
+      MIN_PREVIEW_SCALE,
+      1,
+    )
     : MIN_PREVIEW_SCALE;
   const renderedScale = fitToContainer ? fitScale : manualScale;
   const srcDoc = useMemo(() => {
@@ -325,6 +370,39 @@ function StaticFilePreview({
   useEffect(() => {
     setVariablesDraft(JSON.stringify(previewRuntime?.context.variables ?? {}, null, 2));
   }, [previewRuntime?.context.variables]);
+
+  useEffect(() => {
+    if (!canvasExpanded) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      recenterCanvasRef.current = true;
+      setCanvasExpanded(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [canvasExpanded]);
+
+  useLayoutEffect(() => {
+    scaleRef.current = renderedScale;
+    const stage = stageRef.current;
+    const canvas = canvasRef.current;
+    if (!stage || !canvas) return;
+
+    const anchor = zoomAnchorRef.current;
+    if (anchor) {
+      const canvasRect = canvas.getBoundingClientRect();
+      stage.scrollLeft += canvasRect.left + anchor.canvasX * renderedScale - anchor.clientX;
+      stage.scrollTop += canvasRect.top + anchor.canvasY * renderedScale - anchor.clientY;
+      zoomAnchorRef.current = null;
+      return;
+    }
+
+    if (fitToContainer || recenterCanvasRef.current) {
+      stage.scrollLeft = Math.max(0, (stage.scrollWidth - stage.clientWidth) / 2);
+      stage.scrollTop = Math.max(0, (stage.scrollHeight - stage.clientHeight) / 2);
+      recenterCanvasRef.current = false;
+    }
+  }, [canvasExpanded, deviceId, fitToContainer, renderedScale, stageWidth]);
 
   useEffect(() => {
     const mount = runtimeMountRef.current;
@@ -369,9 +447,129 @@ function StaticFilePreview({
       .finally(() => setStorageBusy(false));
   }
 
-  function adjustScale(delta: number) {
-    setManualScale(clamp(renderedScale + delta, MIN_PREVIEW_SCALE, MAX_PREVIEW_SCALE));
+  function zoomCanvasAt(nextScale: number, clientX: number, clientY: number) {
+    const clampedScale = clamp(nextScale, MIN_PREVIEW_SCALE, MAX_PREVIEW_SCALE);
+    const canvas = canvasRef.current;
+    const currentScale = scaleRef.current;
+    if (Math.abs(clampedScale - currentScale) < 0.001) return;
+
+    if (canvas) {
+      const canvasRect = canvas.getBoundingClientRect();
+      zoomAnchorRef.current = {
+        clientX,
+        clientY,
+        canvasX: (clientX - canvasRect.left) / currentScale,
+        canvasY: (clientY - canvasRect.top) / currentScale,
+      };
+    }
+    scaleRef.current = clampedScale;
+    setManualScale(clampedScale);
     setFitToContainer(false);
+  }
+
+  function adjustScale(delta: number) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const stageRect = stage.getBoundingClientRect();
+    zoomCanvasAt(
+      scaleRef.current + delta,
+      stageRect.left + stageRect.width / 2,
+      stageRect.top + stageRect.height / 2,
+    );
+  }
+
+  function fitCanvasToContainer() {
+    zoomAnchorRef.current = null;
+    recenterCanvasRef.current = true;
+    setFitToContainer(true);
+  }
+
+  function toggleCanvasExpanded() {
+    recenterCanvasRef.current = true;
+    setCanvasExpanded((current) => !current);
+  }
+
+  function handleCanvasWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const deltaMultiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 120 : 1;
+    const nextScale = scaleRef.current * Math.exp(-event.deltaY * deltaMultiplier * 0.0015);
+    zoomCanvasAt(nextScale, event.clientX, event.clientY);
+  }
+
+  function handlePanPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const stage = stageRef.current;
+    if (!stage) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (activePointersRef.current.size === 1) {
+      panStartRef.current = {
+        pointerId: event.pointerId,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        scrollLeft: stage.scrollLeft,
+        scrollTop: stage.scrollTop,
+      };
+      setIsPanning(true);
+      return;
+    }
+
+    if (activePointersRef.current.size === 2) {
+      const [first, second] = Array.from(activePointersRef.current.values());
+      pinchStartRef.current = {
+        distance: Math.hypot(second.x - first.x, second.y - first.y),
+        scale: scaleRef.current,
+      };
+      panStartRef.current = null;
+    }
+  }
+
+  function handlePanPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!activePointersRef.current.has(event.pointerId)) return;
+    const stage = stageRef.current;
+    if (!stage) return;
+    event.preventDefault();
+    activePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (activePointersRef.current.size >= 2) {
+      const [first, second] = Array.from(activePointersRef.current.values());
+      const distance = Math.hypot(second.x - first.x, second.y - first.y);
+      const pinchStart = pinchStartRef.current;
+      if (!pinchStart || pinchStart.distance === 0) return;
+      zoomCanvasAt(
+        pinchStart.scale * (distance / pinchStart.distance),
+        (first.x + second.x) / 2,
+        (first.y + second.y) / 2,
+      );
+      return;
+    }
+
+    const panStart = panStartRef.current;
+    if (!panStart || panStart.pointerId !== event.pointerId) return;
+    stage.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.clientX);
+    stage.scrollTop = panStart.scrollTop - (event.clientY - panStart.clientY);
+  }
+
+  function finishPanPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    activePointersRef.current.delete(event.pointerId);
+    pinchStartRef.current = null;
+    const stage = stageRef.current;
+    const [remaining] = Array.from(activePointersRef.current.entries());
+    if (stage && remaining) {
+      const [pointerId, position] = remaining;
+      panStartRef.current = {
+        pointerId,
+        clientX: position.x,
+        clientY: position.y,
+        scrollLeft: stage.scrollLeft,
+        scrollTop: stage.scrollTop,
+      };
+      return;
+    }
+    panStartRef.current = null;
+    setIsPanning(false);
   }
 
   return (
@@ -647,8 +845,21 @@ function StaticFilePreview({
         </div>
       ) : null}
 
+      {canvasExpanded ? (
+        <div className="fixed inset-0 z-40 bg-slate-950/45 backdrop-blur-[2px]" aria-hidden="true" />
+      ) : null}
+
       {canRenderStatic || runtimeActive ? (
-        <div className="mt-3 flex min-h-[420px] flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-xs">
+        <div
+          className={cn(
+            "flex flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-xs",
+            canvasExpanded
+              ? "fixed inset-3 z-50 min-h-0 shadow-2xl sm:inset-5"
+              : "mt-3 min-h-[480px] flex-1",
+          )}
+          data-testid="preview-canvas-panel"
+          data-expanded={canvasExpanded ? "true" : "false"}
+        >
           <div className="flex flex-wrap items-center gap-2 border-b border-border bg-white/95 p-2">
             <div
               className="flex min-w-0 flex-1 items-center rounded-lg border border-border bg-muted/35 p-0.5"
@@ -663,7 +874,10 @@ function StaticFilePreview({
                     type="button"
                     aria-pressed={selected}
                     title={`${device.label} ${device.width} × ${device.height}`}
-                    onClick={() => setDeviceId(device.id)}
+                    onClick={() => {
+                      recenterCanvasRef.current = true;
+                      setDeviceId(device.id);
+                    }}
                     className={cn(
                       "flex h-9 min-w-9 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-[11px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                       selected
@@ -679,6 +893,17 @@ function StaticFilePreview({
             </div>
 
             <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/35 p-0.5">
+              <Button
+                type="button"
+                variant={panMode ? "subtle" : "ghost"}
+                size="icon-sm"
+                title={panMode ? "关闭画布导航，恢复预览交互" : "拖动画布；支持滚轮和双指缩放"}
+                aria-label="拖动画布"
+                aria-pressed={panMode}
+                onClick={() => setPanMode((current) => !current)}
+              >
+                <Hand />
+              </Button>
               <Button
                 type="button"
                 variant="ghost"
@@ -711,9 +936,20 @@ function StaticFilePreview({
                 title="适合容器"
                 aria-label="适合容器"
                 aria-pressed={fitToContainer}
-                onClick={() => setFitToContainer((current) => !current)}
+                onClick={fitCanvasToContainer}
               >
-                <Maximize2 />
+                <Focus />
+              </Button>
+              <Button
+                type="button"
+                variant={canvasExpanded ? "subtle" : "ghost"}
+                size="icon-sm"
+                title={canvasExpanded ? "退出大画布（Esc）" : "展开大画布"}
+                aria-label={canvasExpanded ? "退出大画布" : "展开大画布"}
+                aria-pressed={canvasExpanded}
+                onClick={toggleCanvasExpanded}
+              >
+                {canvasExpanded ? <Minimize2 /> : <Maximize2 />}
               </Button>
             </div>
           </div>
@@ -726,34 +962,71 @@ function StaticFilePreview({
           </div>
 
           <div
-            ref={stageRef}
-            className="min-h-[344px] flex-1 overflow-auto bg-preview-grid p-3"
+            className="relative min-h-[380px] flex-1 overflow-hidden"
+            onWheel={handleCanvasWheel}
           >
             <div
-              className="mx-auto overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
-              style={{
-                width: selectedDevice.width * renderedScale,
-                height: selectedDevice.height * renderedScale,
-              }}
+              ref={stageRef}
+              className="h-full w-full overflow-auto bg-preview-grid"
+              data-testid="preview-stage"
+              aria-label="预览画布视口"
             >
-              {runtimeActive ? (
-                <div ref={runtimeMountRef} className="h-full w-full bg-white" />
-              ) : (
-                <iframe
-                  title={`${path} 静态预览`}
-                  sandbox=""
-                  referrerPolicy="no-referrer"
-                  srcDoc={srcDoc}
-                  className="block border-0 bg-white"
+              <div
+                className="grid min-h-full min-w-full place-items-center p-3"
+                style={{
+                  width: `max(100%, ${selectedDevice.width * renderedScale + PREVIEW_STAGE_PADDING * 2}px)`,
+                  height: `max(100%, ${selectedDevice.height * renderedScale + PREVIEW_STAGE_PADDING * 2}px)`,
+                }}
+              >
+                <div
+                  ref={canvasRef}
+                  className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
+                  data-testid="preview-canvas"
                   style={{
-                    width: selectedDevice.width,
-                    height: selectedDevice.height,
-                    transform: `scale(${renderedScale})`,
-                    transformOrigin: "top left",
+                    width: selectedDevice.width * renderedScale,
+                    height: selectedDevice.height * renderedScale,
                   }}
-                />
-              )}
+                >
+                  {runtimeActive ? (
+                    <div ref={runtimeMountRef} className="h-full w-full bg-white" />
+                  ) : (
+                    <iframe
+                      title={`${path} 静态预览`}
+                      sandbox=""
+                      referrerPolicy="no-referrer"
+                      srcDoc={srcDoc}
+                      className="block border-0 bg-white"
+                      style={{
+                        width: selectedDevice.width,
+                        height: selectedDevice.height,
+                        transform: `scale(${renderedScale})`,
+                        transformOrigin: "top left",
+                      }}
+                    />
+                  )}
+                </div>
+              </div>
             </div>
+
+            {panMode ? (
+              <div
+                className={cn(
+                  "absolute inset-0 z-20 touch-none select-none",
+                  isPanning ? "cursor-grabbing" : "cursor-grab",
+                )}
+                data-testid="preview-pan-overlay"
+                aria-label="画布导航层"
+                onPointerDown={handlePanPointerDown}
+                onPointerMove={handlePanPointerMove}
+                onPointerUp={finishPanPointer}
+                onPointerCancel={finishPanPointer}
+                onDoubleClick={fitCanvasToContainer}
+              >
+                <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-full border border-slate-200/80 bg-white/90 px-3 py-1 text-[10px] font-medium text-slate-600 shadow-sm backdrop-blur">
+                  拖动平移 · 滚轮或双指缩放 · 双击适配
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : (

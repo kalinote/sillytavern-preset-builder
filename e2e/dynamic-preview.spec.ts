@@ -430,6 +430,58 @@ test("isolated Preview Host covers chunking, compatibility, message HTML, storag
     await expect(runtimeFrame).toHaveCount(1);
   }
 
+  const canvasPanel = page.getByTestId("preview-canvas-panel");
+  const canvasStage = page.getByTestId("preview-stage");
+  const previewCanvas = page.getByTestId("preview-canvas");
+  const inlineStageWidth = await canvasStage.evaluate((element) => element.clientWidth);
+  await page.getByRole("button", { name: "展开大画布", exact: true }).click();
+  await expect(canvasPanel).toHaveAttribute("data-expanded", "true");
+  await expect(page.getByRole("button", { name: "退出大画布", exact: true })).toBeVisible();
+  await expect.poll(() => canvasStage.evaluate((element) => element.clientWidth))
+    .toBeGreaterThan(inlineStageWidth * 2);
+
+  await page.getByRole("button", { name: "拖动画布", exact: true }).click();
+  const stageBounds = await canvasStage.boundingBox();
+  if (!stageBounds) throw new Error("Preview canvas stage is not visible");
+  const stageCenter = {
+    x: stageBounds.x + stageBounds.width / 2,
+    y: stageBounds.y + stageBounds.height / 2,
+  };
+  const canvasWidthBeforeWheel = await previewCanvas.evaluate((element) => element.getBoundingClientRect().width);
+  await page.mouse.move(stageCenter.x, stageCenter.y);
+  await page.mouse.wheel(0, -900);
+  await expect.poll(() => previewCanvas.evaluate((element) => element.getBoundingClientRect().width))
+    .toBeGreaterThan(canvasWidthBeforeWheel);
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const hasScrollableCanvas = await canvasStage.evaluate((element) =>
+      element.scrollWidth > element.clientWidth && element.scrollHeight > element.clientHeight,
+    );
+    if (hasScrollableCanvas) break;
+    await page.getByRole("button", { name: "放大画布", exact: true }).click();
+  }
+  await expect.poll(() => canvasStage.evaluate((element) =>
+    element.scrollWidth > element.clientWidth && element.scrollHeight > element.clientHeight,
+  )).toBe(true);
+
+  const scrollBeforeDrag = await canvasStage.evaluate((element) => ({
+    left: element.scrollLeft,
+    top: element.scrollTop,
+  }));
+  await page.mouse.move(stageCenter.x, stageCenter.y);
+  await page.mouse.down();
+  await page.mouse.move(stageCenter.x - 120, stageCenter.y - 90, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(() => canvasStage.evaluate((element) => element.scrollLeft))
+    .toBeGreaterThan(scrollBeforeDrag.left);
+  await expect.poll(() => canvasStage.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(scrollBeforeDrag.top);
+
+  await page.getByRole("button", { name: "拖动画布", exact: true }).click();
+  await page.getByRole("button", { name: "适合容器", exact: true }).click();
+  await page.getByRole("button", { name: "退出大画布", exact: true }).click();
+  await expect(canvasPanel).toHaveAttribute("data-expanded", "false");
+
   // Nested frame pointer coordinates are unreliable while the outer canvas is
   // CSS-scaled. Use the mobile viewport at 100% so these are genuine trusted
   // mouse activations, not dispatchEvent/evaluate substitutes.
