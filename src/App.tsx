@@ -39,7 +39,7 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { useProjectWorkspace } from "./hooks/use-project-workspace";
 import { useStConnection } from "./hooks/use-st-connection";
 import { runSafely } from "./lib/async";
-import type { ProjectExportResult, StructureMutation } from "./lib/project-api";
+import type { JsonValue, ProjectExportResult, StructureMutation } from "./lib/project-api";
 import { buildProjectResourceCatalog } from "./lib/project-resource-catalog";
 import { useProjectPreviewRuntime } from "./preview/use-project-preview-runtime";
 
@@ -257,11 +257,18 @@ export default function App() {
     }, "完整 JSON 已应用并重新拆分");
 
   const handleStructureMutation = useCallback((mutation: StructureMutation) => {
+    if (mutation.op === "set-prompt-order") {
+      requestWorkspaceAction(() => workspace.setPromptOrder(mutation.promptOrder));
+      return;
+    }
     requestWorkspaceAction(() => runOperation(
       () => workspace.mutateStructure(mutation),
       mutation.op === "delete" ? "条目已删除，并已创建恢复快照" : "工程结构已更新",
     ));
   }, [requestWorkspaceAction, runOperation, workspace]);
+  const handlePromptOrderChange = useCallback((promptOrder: JsonValue[], identifier: string) => {
+    requestWorkspaceAction(() => workspace.setPromptOrder(promptOrder, identifier));
+  }, [requestWorkspaceAction, workspace]);
 
   const handleValidate = () => runOperation(async () => {
     const result = await workspace.validateProject();
@@ -431,6 +438,10 @@ export default function App() {
                     onSelect={handleDesktopFileSelect}
                     onOpenProjects={openProjectManager}
                     onOpenSettings={() => setSettingsDialogOpen(true)}
+                    promptOrder={workspace.structure?.promptOrder}
+                    promptOrderBusy={workspace.structureMutation === "saving"}
+                    promptOrderPending={workspace.promptOrderPending}
+                    onPromptOrderChange={handlePromptOrderChange}
                   />
                 </ResizableSidebar>
               )}
@@ -565,6 +576,10 @@ export default function App() {
                     onSelect={handleMobileFileSelect}
                     onOpenProjects={openProjectManager}
                     onOpenSettings={() => setSettingsDialogOpen(true)}
+                    promptOrder={workspace.structure?.promptOrder}
+                    promptOrderBusy={workspace.structureMutation === "saving"}
+                    promptOrderPending={workspace.promptOrderPending}
+                    onPromptOrderChange={handlePromptOrderChange}
                   />
                 </div>
               )}

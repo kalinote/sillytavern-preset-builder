@@ -1,4 +1,6 @@
 import {
+  ArrowDown,
+  ArrowUp,
   Braces,
   ChevronRight,
   Code2,
@@ -7,17 +9,25 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  GripVertical,
   Regex,
   Search,
   Settings2,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 
+import type { JsonValue } from "../../lib/project-api";
 import type { ProjectResourceEntry } from "../../lib/project-resource-catalog";
+import {
+  movePrimaryPrompt,
+  movePrimaryPromptByDelta,
+  setPrimaryPromptEnabled,
+} from "../../lib/prompt-order";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 
 interface WorkspaceFileExplorerProps {
   projectName: string;
@@ -27,6 +37,10 @@ interface WorkspaceFileExplorerProps {
   onSelect: (path: string) => void;
   onOpenProjects: () => void;
   onOpenSettings?: () => void;
+  promptOrder?: JsonValue[];
+  promptOrderBusy?: boolean;
+  promptOrderPending?: ReadonlySet<string>;
+  onPromptOrderChange?: (promptOrder: JsonValue[], identifier: string) => void;
   className?: string;
 }
 
@@ -35,6 +49,11 @@ interface ExplorerNode {
   label: string;
   children: ExplorerNode[];
   fileCount: number;
+}
+
+interface PromptDropTarget {
+  identifier: string;
+  placement: "before" | "after";
 }
 
 const initiallyExpanded = new Set([
@@ -57,10 +76,16 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
   onSelect,
   onOpenProjects,
   onOpenSettings,
+  promptOrder = [],
+  promptOrderBusy,
+  promptOrderPending,
+  onPromptOrderChange,
   className,
 }: WorkspaceFileExplorerProps) {
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initiallyExpanded));
+  const [draggedPrompt, setDraggedPrompt] = useState<string>();
+  const [promptDropTarget, setPromptDropTarget] = useState<PromptDropTarget>();
   const normalizedQuery = query.trim().toLowerCase();
   const tree = useMemo(() => {
     const fullTree = buildTree(files);
@@ -88,14 +113,45 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
     });
   }, [activeTreePath]);
 
-  const toggleDirectory = (path: string) => {
+  const toggleDirectory = useCallback((path: string) => {
     setExpanded((current) => {
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
-  };
+  }, []);
+
+  const changePromptEnabled = useCallback((identifier: string, enabled: boolean) => {
+    onPromptOrderChange?.(setPrimaryPromptEnabled(promptOrder, identifier, enabled), identifier);
+  }, [onPromptOrderChange, promptOrder]);
+
+  const movePromptByDelta = useCallback((identifier: string, delta: -1 | 1) => {
+    onPromptOrderChange?.(movePrimaryPromptByDelta(promptOrder, identifier, delta), identifier);
+  }, [onPromptOrderChange, promptOrder]);
+
+  const finishPromptDrop = useCallback((target: PromptDropTarget) => {
+    if (!draggedPrompt || draggedPrompt === target.identifier) return;
+    onPromptOrderChange?.(movePrimaryPrompt(
+      promptOrder,
+      draggedPrompt,
+      target.identifier,
+      target.placement,
+    ), draggedPrompt);
+    setDraggedPrompt(undefined);
+    setPromptDropTarget(undefined);
+  }, [draggedPrompt, onPromptOrderChange, promptOrder]);
+
+  const endPromptDrag = useCallback(() => {
+    setDraggedPrompt(undefined);
+    setPromptDropTarget(undefined);
+  }, []);
+  const updatePromptDropTarget = useCallback((target: PromptDropTarget) => {
+    setPromptDropTarget((current) => current?.identifier === target.identifier
+      && current.placement === target.placement
+      ? current
+      : target);
+  }, []);
 
   return (
     <aside
@@ -147,6 +203,16 @@ export const WorkspaceFileExplorer = memo(function WorkspaceFileExplorer({
             forceExpanded={Boolean(normalizedQuery)}
             onToggle={toggleDirectory}
             onSelect={onSelect}
+            promptOrderBusy={promptOrderBusy}
+            promptOrderPending={promptOrderPending}
+            draggedPrompt={draggedPrompt}
+            promptDropTarget={promptDropTarget}
+            onPromptEnabledChange={changePromptEnabled}
+            onPromptMove={movePromptByDelta}
+            onPromptDragStart={setDraggedPrompt}
+            onPromptDragOver={updatePromptDropTarget}
+            onPromptDrop={finishPromptDrop}
+            onPromptDragEnd={endPromptDrag}
           />
         ))}
 
@@ -178,6 +244,16 @@ function TreeNodeRow({
   forceExpanded,
   onToggle,
   onSelect,
+  promptOrderBusy,
+  promptOrderPending,
+  draggedPrompt,
+  promptDropTarget,
+  onPromptEnabledChange,
+  onPromptMove,
+  onPromptDragStart,
+  onPromptDragOver,
+  onPromptDrop,
+  onPromptDragEnd,
 }: {
   node: ExplorerNode;
   depth: number;
@@ -186,6 +262,16 @@ function TreeNodeRow({
   forceExpanded: boolean;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
+  promptOrderBusy?: boolean;
+  promptOrderPending?: ReadonlySet<string>;
+  draggedPrompt?: string;
+  promptDropTarget?: PromptDropTarget;
+  onPromptEnabledChange: (identifier: string, enabled: boolean) => void;
+  onPromptMove: (identifier: string, delta: -1 | 1) => void;
+  onPromptDragStart: (identifier: string) => void;
+  onPromptDragOver: (target: PromptDropTarget) => void;
+  onPromptDrop: (target: PromptDropTarget) => void;
+  onPromptDragEnd: () => void;
 }) {
   if (node.entry.kind !== "directory") {
     const sourcePath = node.entry.sourcePath;
@@ -204,26 +290,137 @@ function TreeNodeRow({
 
   const isExpanded = forceExpanded || expanded.has(node.entry.treePath);
   const rootGroup = depth === 0;
+  const prompt = node.entry.promptOrder;
+  const promptEnabled = Boolean(prompt?.enabled && prompt.referenced);
+  const canEditPromptOrder = Boolean(prompt?.editable && !promptOrderBusy);
+  const promptOrderIsPending = Boolean(prompt && promptOrderPending?.has(prompt.identifier));
+  const canMovePrompt = Boolean(canEditPromptOrder && prompt?.referenced);
+  const isDraggedPrompt = prompt?.identifier === draggedPrompt;
+  const activeDropTarget = prompt?.identifier === promptDropTarget?.identifier
+    ? promptDropTarget
+    : undefined;
+
+  const handlePromptDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!prompt || !canMovePrompt || !draggedPrompt || draggedPrompt === prompt.identifier) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const bounds = event.currentTarget.getBoundingClientRect();
+    onPromptDragOver({
+      identifier: prompt.identifier,
+      placement: event.clientY < bounds.top + bounds.height / 2 ? "before" : "after",
+    });
+  };
+
   return (
-    <section className={rootGroup ? "mb-2" : "my-0.5"}>
-      <button
-        type="button"
-        onClick={() => onToggle(node.entry.treePath)}
+    <section className={cn(
+      rootGroup ? "mb-2" : "my-0.5",
+      prompt && "group/prompt [content-visibility:auto] [contain-intrinsic-size:auto_32px]",
+    )}>
+      <div
         className={cn(
-          "flex w-full min-w-0 items-center gap-2 rounded-md py-1.5 pr-2 text-left text-foreground outline-none hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/30",
+          "relative flex w-full min-w-0 items-center rounded-md text-foreground hover:bg-muted/70",
           rootGroup && "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground",
           !rootGroup && "text-xs font-medium",
+          prompt && !prompt.enabled && "text-muted-foreground",
+          isDraggedPrompt && "opacity-45",
         )}
-        style={{ paddingLeft: `${8 + depth * 14}px` }}
-        aria-expanded={isExpanded}
-        data-tree-path={node.entry.treePath}
-        data-plugin-id={rootGroup ? node.entry.pluginId : undefined}
+        onDragOver={handlePromptDragOver}
+        onDrop={(event) => {
+          if (!prompt || !canMovePrompt || !draggedPrompt || draggedPrompt === prompt.identifier) return;
+          event.preventDefault();
+          const bounds = event.currentTarget.getBoundingClientRect();
+          onPromptDrop({
+            identifier: prompt.identifier,
+            placement: event.clientY < bounds.top + bounds.height / 2 ? "before" : "after",
+          });
+        }}
       >
-        <ChevronRight className={cn("size-3 shrink-0 transition-transform", isExpanded && "rotate-90")} />
-        {isExpanded ? <FolderOpen className="size-3.5 shrink-0 text-primary" /> : <Folder className="size-3.5 shrink-0" />}
-        <span className="min-w-0 flex-1 truncate">{node.label}</span>
-        <span className="font-mono text-[9px] font-normal text-muted-foreground">{node.fileCount}</span>
-      </button>
+        {activeDropTarget ? (
+          <span
+            className={cn(
+              "pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-primary",
+              activeDropTarget.placement === "before" ? "top-0" : "bottom-0",
+            )}
+          />
+        ) : null}
+        <button
+          type="button"
+          onClick={() => onToggle(node.entry.treePath)}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
+          aria-expanded={isExpanded}
+          data-tree-path={node.entry.treePath}
+          data-plugin-id={rootGroup ? node.entry.pluginId : undefined}
+        >
+          <ChevronRight className={cn("size-3 shrink-0 transition-transform", isExpanded && "rotate-90")} />
+          {isExpanded ? <FolderOpen className="size-3.5 shrink-0 text-primary" /> : <Folder className="size-3.5 shrink-0" />}
+          <span className="min-w-0 flex-1 truncate">{node.label}</span>
+          {!prompt ? <span className="font-mono text-[9px] font-normal text-muted-foreground">{node.fileCount}</span> : null}
+        </button>
+        {prompt ? (
+          <div className="flex shrink-0 items-center gap-0.5 pr-1">
+            <span
+              draggable={canMovePrompt}
+              className={cn(
+                "flex size-6 items-center justify-center rounded text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/30",
+                canMovePrompt ? "cursor-grab hover:bg-surface hover:text-foreground active:cursor-grabbing" : "cursor-not-allowed opacity-30",
+              )}
+              title={prompt.referenced ? "拖动调整运行顺序" : "启用后可调整顺序"}
+              aria-hidden="true"
+              onDragStart={(event) => {
+                if (!canMovePrompt) return;
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", prompt.identifier);
+                onPromptDragStart(prompt.identifier);
+              }}
+              onDragEnd={onPromptDragEnd}
+            >
+              <GripVertical className="size-3.5" />
+            </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="size-6"
+              disabled={!canMovePrompt || prompt.position === 0}
+              onClick={() => onPromptMove(prompt.identifier, -1)}
+              aria-label={`上移 ${node.label}`}
+              title="在 Prompt Order 中上移"
+            >
+              <ArrowUp className="size-3" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="size-6"
+              disabled={!canMovePrompt || prompt.last}
+              onClick={() => onPromptMove(prompt.identifier, 1)}
+              aria-label={`下移 ${node.label}`}
+              title="在 Prompt Order 中下移"
+            >
+              <ArrowDown className="size-3" />
+            </Button>
+            <Switch
+              checked={promptEnabled}
+              disabled={!canEditPromptOrder}
+              className={cn(
+                "ml-0.5 h-4 w-8 border shadow-inner disabled:opacity-70 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-4",
+                promptEnabled
+                  ? "border-primary/40 bg-primary-soft data-[state=checked]:bg-primary-soft [&>span]:bg-primary"
+                  : "border-border bg-border data-[state=unchecked]:bg-border [&>span]:bg-white",
+                promptOrderIsPending && "ring-1 ring-primary/35",
+              )}
+              onCheckedChange={(enabled) => onPromptEnabledChange(prompt.identifier, enabled)}
+              aria-label={`${promptEnabled ? "禁用" : "启用"} ${node.label}`}
+              aria-busy={promptOrderIsPending}
+              title={promptOrderIsPending
+                ? "正在保存 Prompt Order…"
+                : prompt.referenced
+                  ? `${prompt.enabled ? "已启用" : "已禁用"} · Character ${prompt.characterId}`
+                  : "未加入 Prompt Order；开启后追加到末尾"}
+            />
+          </div>
+        ) : null}
+      </div>
       {isExpanded ? (
         <div>
           {node.children.map((child) => (
@@ -236,6 +433,16 @@ function TreeNodeRow({
               forceExpanded={forceExpanded}
               onToggle={onToggle}
               onSelect={onSelect}
+              promptOrderBusy={promptOrderBusy}
+              promptOrderPending={promptOrderPending}
+              draggedPrompt={draggedPrompt}
+              promptDropTarget={promptDropTarget}
+              onPromptEnabledChange={onPromptEnabledChange}
+              onPromptMove={onPromptMove}
+              onPromptDragStart={onPromptDragStart}
+              onPromptDragOver={onPromptDragOver}
+              onPromptDrop={onPromptDrop}
+              onPromptDragEnd={onPromptDragEnd}
             />
           ))}
         </div>

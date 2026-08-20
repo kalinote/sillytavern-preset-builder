@@ -15,7 +15,7 @@ import {
   type StSessionManagerOptions,
 } from "./st-session-manager.js";
 import { parseStAllowedOrigins, parseStTargetPolicy } from "./st-http-client.js";
-import type { ImportProjectInput, JsonObject, StructureMutation } from "./types.js";
+import type { ImportProjectInput, JsonObject, JsonValue, StructureMutation } from "./types.js";
 
 const DEFAULT_BODY_LIMIT = 64 * 1024 * 1024;
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
@@ -907,6 +907,16 @@ export function createApiServer(options: ApiServerOptions = {}): {
         }
         if (mutation.op !== "set-prompt-order" && !["prompt", "regex", "script"].includes(String(mutation.kind))) {
           throw new ApiError(422, "INVALID_STRUCTURE_MUTATION", "Unknown project item kind");
+        }
+        if (mutation.op === "set-prompt-order") {
+          if (!Array.isArray(mutation.promptOrder)) {
+            throw new ApiError(422, "INVALID_STRUCTURE_MUTATION", "promptOrder must be an array");
+          }
+          sendJson(response, 200, await store.setProjectPromptOrder(mutationMatch[1] as string, {
+            ifRevision: body.ifRevision,
+            promptOrder: mutation.promptOrder as JsonValue[],
+          }));
+          return;
         }
         const result = await store.mutateProjectStructure(mutationMatch[1] as string, {
           ifRevision: body.ifRevision,

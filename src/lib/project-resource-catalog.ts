@@ -1,4 +1,5 @@
 import type { ProjectFileEntry, ProjectStructure } from "./project-api";
+import { readPrimaryPromptOrder } from "./prompt-order";
 
 export type ProjectPluginId = string;
 
@@ -34,6 +35,16 @@ export interface ProjectResourceEntry {
   displayName: string;
   order?: number;
   role?: "source-json";
+  promptOrder?: {
+    identifier: string;
+    groupIndex: number;
+    characterId: string;
+    position?: number;
+    last: boolean;
+    enabled: boolean;
+    referenced: boolean;
+    editable: boolean;
+  };
 }
 
 const PLUGIN_ORDER = [
@@ -105,6 +116,22 @@ export function buildProjectResourceCatalog(
   const regex = new Map((structure?.regex ?? []).map((item) => [item.uid, item]));
   const scripts = new Map((structure?.scripts ?? []).map((item) => [item.uid, item]));
   const pluginLabels = new Map((structure?.plugins ?? []).map((plugin) => [plugin.id, plugin.displayName]));
+  const primaryPromptOrder = readPrimaryPromptOrder(structure?.promptOrder ?? []);
+  const promptIdentifierCounts = new Map<string, number>();
+  for (const prompt of structure?.prompts ?? []) {
+    if (!prompt.identifier) continue;
+    promptIdentifierCounts.set(prompt.identifier, (promptIdentifierCounts.get(prompt.identifier) ?? 0) + 1);
+  }
+  const promptOrderEntries = new Map(
+    primaryPromptOrder.entries.map((entry) => [entry.identifier, entry]),
+  );
+  const promptOrderIdentifierCounts = new Map<string, number>();
+  for (const entry of primaryPromptOrder.entries) {
+    promptOrderIdentifierCounts.set(
+      entry.identifier,
+      (promptOrderIdentifierCounts.get(entry.identifier) ?? 0) + 1,
+    );
+  }
 
   function pluginOrder(pluginId: string): number {
     const knownOrder = PLUGIN_ORDER.indexOf(pluginId as (typeof PLUGIN_ORDER)[number]);
@@ -246,7 +273,25 @@ export function buildProjectResourceCatalog(
       const itemLabel = isSpreset
         ? `SPresetSettings${item?.name ? ` · ${item.name}` : ""}`
         : item?.name || item?.identifier || `Prompt ${item?.order === undefined ? uid : item.order + 1}`;
-      ensureDirectory(itemPath, pluginId, resourceType, itemLabel, item?.order);
+      const orderEntry = item?.identifier ? promptOrderEntries.get(item.identifier) : undefined;
+      const runtimeOrder = isSpreset
+        ? item?.order
+        : orderEntry?.position ?? primaryPromptOrder.entries.length + (item?.order ?? prompts.size);
+      ensureDirectory(itemPath, pluginId, resourceType, itemLabel, runtimeOrder);
+      const directoryEntry = entries.get(itemPath);
+      if (directoryEntry && !isSpreset && item?.identifier) {
+        directoryEntry.promptOrder = {
+          identifier: item.identifier,
+          groupIndex: primaryPromptOrder.groupIndex,
+          characterId: String(primaryPromptOrder.characterId),
+          ...(orderEntry ? { position: orderEntry.position } : {}),
+          last: orderEntry?.position === primaryPromptOrder.entries.length - 1,
+          enabled: orderEntry?.enabled ?? false,
+          referenced: orderEntry !== undefined,
+          editable: promptIdentifierCounts.get(item.identifier) === 1
+            && (promptOrderIdentifierCounts.get(item.identifier) ?? 0) <= 1,
+        };
+      }
       addFile(file, `${itemPath}/${promptMatch[2]}`, pluginId, resourceType);
       continue;
     }

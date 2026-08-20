@@ -10,7 +10,7 @@ import {
 import { atomicWriteFile } from "./atomic.js";
 import { buildPresetProject } from "./builder.js";
 import { ApiError } from "./errors.js";
-import { firstSemanticDifference, isJsonObject, semanticEqual, stableSha256, stringifyJson } from "./json.js";
+import { cloneJson, firstSemanticDifference, isJsonObject, semanticEqual, stableSha256, stringifyJson } from "./json.js";
 import { installManagedSources, stageManagedSources } from "./managed-source-transaction.js";
 import {
   createProjectSnapshot,
@@ -18,13 +18,21 @@ import {
   listProjectSnapshots,
   readSnapshotPreset,
 } from "./project-snapshots.js";
-import { applyStructureMutation, readProjectStructure } from "./project-structure.js";
+import {
+  applyStructureMutation,
+  calculatePromptOrderRevision,
+  readProjectStructure,
+  readPromptIdentifiers,
+  readPromptOrder,
+  validatePromptOrder,
+} from "./project-structure.js";
 import { assertProjectId, resolveInsideProject, safeExportStem } from "./safety.js";
 import { createBlankPreset, splitPresetProject } from "./splitter.js";
 import type {
   BuildResult,
   ImportProjectInput,
   JsonObject,
+  JsonValue,
   ProjectFile,
   ProjectFileEntry,
   ProjectManifest,
@@ -459,6 +467,57 @@ export class ProjectStore {
     return this.withProjectLock(projectId, async () => {
       const manifest = await this.readManifest(projectRoot);
       return readProjectStructure(projectRoot, manifest);
+    });
+  }
+
+  async setProjectPromptOrder(
+    projectId: string,
+    input: { ifRevision: string; promptOrder: JsonValue[] },
+  ): Promise<{
+    project: ProjectManifest;
+    projectRevision: string;
+    promptOrderRevision: string;
+  }> {
+    if (typeof input.ifRevision !== "string" || !input.ifRevision || !Array.isArray(input.promptOrder)) {
+      throw new ApiError(400, "INVALID_INPUT", "ifRevision and promptOrder are required");
+    }
+    const projectRoot = this.projectRoot(projectId);
+    return this.withProjectLock(projectId, async () => {
+      const manifest = await this.readManifest(projectRoot);
+      const currentPromptOrder = await readPromptOrder(projectRoot);
+      const currentRevision = calculatePromptOrderRevision(currentPromptOrder);
+      if (input.ifRevision !== currentRevision) {
+        throw new ApiError(409, "REVISION_CONFLICT", "Prompt order changed since it was opened", {
+          expected: input.ifRevision,
+          actual: currentRevision,
+        });
+      }
+
+      validatePromptOrder(input.promptOrder, await readPromptIdentifiers(projectRoot));
+      const nextPromptOrder = cloneJson(input.promptOrder);
+      const nextManifest = structuredClone(manifest);
+      nextManifest.updatedAt = new Date().toISOString();
+      const promptOrderPath = join(projectRoot, "prompts", "prompt-order.json");
+      let promptOrderWritten = false;
+      try {
+        await atomicWriteFile(promptOrderPath, stringifyJson(nextPromptOrder));
+        promptOrderWritten = true;
+        await atomicWriteFile(join(projectRoot, "project.json"), stringifyJson(nextManifest as unknown as JsonObject));
+      } catch (error) {
+        if (promptOrderWritten) {
+          await atomicWriteFile(promptOrderPath, stringifyJson(currentPromptOrder)).catch(() => undefined);
+        }
+        if (error instanceof ApiError) throw error;
+        throw new ApiError(422, "PROMPT_ORDER_UPDATE_FAILED", "Prompt order could not be committed", {
+          cause: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      return {
+        project: structuredClone(nextManifest),
+        projectRevision: nextManifest.updatedAt,
+        promptOrderRevision: calculatePromptOrderRevision(nextPromptOrder),
+      };
     });
   }
 

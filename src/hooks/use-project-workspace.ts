@@ -15,6 +15,7 @@ import {
   type ExportProjectInput,
   type ImportProjectArchiveInput,
   type ImportProjectInput,
+  type JsonValue,
   type Project,
   type ProjectApi,
   type ProjectArchiveDownload,
@@ -48,6 +49,7 @@ export class ExplicitSourceDraftError extends Error {
 }
 
 const WORKSPACE_SELECTION_KEY = "preset-studio:workspace-selection:v1";
+const PROMPT_ORDER_EDITOR_PENDING = "__prompt-order-editor__";
 
 function workspaceWasClosed() {
   try {
@@ -108,6 +110,8 @@ export interface UseProjectWorkspaceResult {
   structure: ProjectStructure | null;
   structureLoading: boolean;
   structureMutation: "idle" | "saving" | "error";
+  promptOrderPending: ReadonlySet<string>;
+  promptOrderSaving: boolean;
   diagnostics: ProjectDiagnostic[];
   diagnosticsStale: boolean;
   snapshots: ProjectSnapshotSummary[];
@@ -138,6 +142,7 @@ export interface UseProjectWorkspaceResult {
   downloadProjectArchive: () => Promise<ProjectArchiveDownload>;
   refreshStructure: () => Promise<ProjectStructure>;
   mutateStructure: (mutation: StructureMutation) => Promise<void>;
+  setPromptOrder: (promptOrder: JsonValue[], identifier?: string) => Promise<void>;
   validateProject: () => Promise<ProjectBuildResult>;
   updateProjectSettings: (input: Omit<UpdateProjectInput, "ifProjectRevision">) => Promise<Project>;
   createSnapshot: (label?: string) => Promise<ProjectSnapshotSummary>;
@@ -214,6 +219,7 @@ export function useProjectWorkspace(
   const [structure, setStructure] = useState<ProjectStructure | null>(null);
   const [structureLoading, setStructureLoading] = useState(false);
   const [structureMutation, setStructureMutation] = useState<"idle" | "saving" | "error">("idle");
+  const [promptOrderPending, setPromptOrderPending] = useState<ReadonlySet<string>>(() => new Set());
   const [diagnostics, setDiagnostics] = useState<ProjectDiagnostic[]>([]);
   const [diagnosticsStale, setDiagnosticsStale] = useState(true);
   const [snapshots, setSnapshots] = useState<ProjectSnapshotSummary[]>([]);
@@ -231,6 +237,13 @@ export function useProjectWorkspace(
   const fileAbortRef = useRef<AbortController | null>(null);
   const onErrorRef = useRef(options.onError);
   const structureRef = useRef<ProjectStructure | null>(null);
+  const structureRevisionStaleRef = useRef(false);
+  const promptOrderRevisionStaleRef = useRef(false);
+  const optimisticPromptOrderRef = useRef<JsonValue[]>([]);
+  const promptOrderGenerationRef = useRef(0);
+  const promptOrderPendingGenerationRef = useRef(new Map<string, number>());
+  const queuedPromptOrderRef = useRef<{ promptOrder: JsonValue[]; generation: number } | null>(null);
+  const promptOrderDrainRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     onErrorRef.current = options.onError;
@@ -312,6 +325,9 @@ export function useProjectWorkspace(
               setProject(updatedProject);
               setFiles(updatedFiles);
               structureRef.current = updatedStructure;
+              structureRevisionStaleRef.current = false;
+              promptOrderRevisionStaleRef.current = false;
+              optimisticPromptOrderRef.current = updatedStructure.promptOrder;
               setStructure(updatedStructure);
               setSnapshots(updatedSnapshots);
               setDiagnosticsStale(true);
@@ -334,6 +350,10 @@ export function useProjectWorkspace(
           if (mountedRef.current) {
             setActiveFile(mergedFile);
             if (!isSourceJsonFile(savedFile)) {
+              structureRevisionStaleRef.current = true;
+              if (savedPath === "prompts/prompt-order.json") {
+                promptOrderRevisionStaleRef.current = true;
+              }
               setFiles((currentFiles) =>
                 currentFiles.map((file) =>
                   file.path === savedPath
@@ -457,6 +477,7 @@ export function useProjectWorkspace(
   const openProject = useCallback(
     async (projectId: string, preferredFilePath?: string) => {
       await flushBeforeOperation();
+      await promptOrderDrainRef.current;
       projectAbortRef.current?.abort();
       fileAbortRef.current?.abort();
       const controller = new AbortController();
@@ -505,6 +526,12 @@ export function useProjectWorkspace(
         setProject(loadedProject);
         setFiles(loadedFiles);
         structureRef.current = loadedStructure;
+        structureRevisionStaleRef.current = false;
+        promptOrderRevisionStaleRef.current = false;
+        optimisticPromptOrderRef.current = loadedStructure.promptOrder;
+        promptOrderPendingGenerationRef.current.clear();
+        queuedPromptOrderRef.current = null;
+        setPromptOrderPending(new Set());
         setStructure(loadedStructure);
         setSnapshots(loadedSnapshots);
         setDiagnostics([]);
@@ -644,6 +671,9 @@ export function useProjectWorkspace(
     try {
       const loaded = await api.getProjectStructure(currentProject.id);
       structureRef.current = loaded;
+      structureRevisionStaleRef.current = false;
+      promptOrderRevisionStaleRef.current = false;
+      optimisticPromptOrderRef.current = loaded.promptOrder;
       if (mountedRef.current) setStructure(loaded);
       return loaded;
     } catch (caught) {
@@ -654,10 +684,141 @@ export function useProjectWorkspace(
     }
   }, [api, flushBeforeOperation, reportError]);
 
+  const ensureFreshStructureRevision = useCallback(async (projectId: string) => {
+    const current = structureRef.current;
+    if (!current) throw new Error("No project structure is currently open");
+    if (!structureRevisionStaleRef.current) return current;
+
+    const loaded = await api.getProjectStructure(projectId);
+    if (projectRef.current?.id !== projectId) {
+      throw new Error("The active project changed while refreshing its structure");
+    }
+    structureRef.current = loaded;
+    structureRevisionStaleRef.current = false;
+    promptOrderRevisionStaleRef.current = false;
+    optimisticPromptOrderRef.current = loaded.promptOrder;
+    if (mountedRef.current) setStructure(loaded);
+    return loaded;
+  }, [api]);
+
+  const drainPromptOrderChanges = useCallback(async () => {
+    try {
+      await flushBeforeOperation();
+      while (true) {
+        while (queuedPromptOrderRef.current) {
+          const currentProject = projectRef.current;
+          if (!currentProject || !structureRef.current) {
+            throw new Error("No project structure is currently open");
+          }
+
+          if (promptOrderRevisionStaleRef.current) {
+            const loaded = await api.getProjectStructure(currentProject.id);
+            if (projectRef.current?.id !== currentProject.id) {
+              throw new Error("The active project changed while refreshing prompt order");
+            }
+            structureRef.current = loaded;
+            structureRevisionStaleRef.current = false;
+            promptOrderRevisionStaleRef.current = false;
+          }
+
+          const pending = queuedPromptOrderRef.current;
+          queuedPromptOrderRef.current = null;
+          const committedStructure = structureRef.current;
+          const result = await api.setProjectPromptOrder(
+            currentProject.id,
+            committedStructure.promptOrderRevision,
+            pending.promptOrder,
+          );
+          if (projectRef.current?.id !== currentProject.id) return;
+
+          projectRef.current = result.project;
+          const nextCommittedStructure: ProjectStructure = {
+            ...committedStructure,
+            projectRevision: result.projectRevision,
+            promptOrder: pending.promptOrder,
+            promptOrderRevision: result.promptOrderRevision,
+          };
+          structureRef.current = nextCommittedStructure;
+          structureRevisionStaleRef.current = true;
+          promptOrderRevisionStaleRef.current = false;
+          for (const [identifier, generation] of promptOrderPendingGenerationRef.current) {
+            if (generation <= pending.generation) {
+              promptOrderPendingGenerationRef.current.delete(identifier);
+            }
+          }
+
+          if (mountedRef.current) {
+            setProject(result.project);
+            setProjects((items) => mergeProjectSummary(items, result.project));
+            setStructure({
+              ...nextCommittedStructure,
+              promptOrder: optimisticPromptOrderRef.current,
+            });
+            setPromptOrderPending(new Set(promptOrderPendingGenerationRef.current.keys()));
+            setDiagnosticsStale(true);
+            setError(null);
+          }
+        }
+
+        if (
+          !dirtyRef.current
+          && activeFileRef.current?.path === "prompts/prompt-order.json"
+          && projectRef.current
+        ) {
+          applyLoadedFile(await api.getProjectFile(projectRef.current.id, "prompts/prompt-order.json"));
+        }
+        if (!queuedPromptOrderRef.current) break;
+      }
+    } catch (caught) {
+      queuedPromptOrderRef.current = null;
+      promptOrderPendingGenerationRef.current.clear();
+      structureRevisionStaleRef.current = true;
+      promptOrderRevisionStaleRef.current = true;
+      const committed = structureRef.current;
+      if (committed) optimisticPromptOrderRef.current = committed.promptOrder;
+      if (mountedRef.current) {
+        setPromptOrderPending(new Set());
+        if (committed) setStructure(committed);
+      }
+      reportError(caught);
+      throw caught;
+    } finally {
+      promptOrderDrainRef.current = null;
+    }
+  }, [api, applyLoadedFile, flushBeforeOperation, reportError]);
+
+  const setPromptOrder = useCallback((nextPromptOrder: JsonValue[], identifier?: string) => {
+    const currentProject = projectRef.current;
+    if (!currentProject || !structureRef.current) {
+      return Promise.reject(new Error("No project structure is currently open"));
+    }
+
+    const generation = promptOrderGenerationRef.current + 1;
+    promptOrderGenerationRef.current = generation;
+    const pendingKey = identifier ?? PROMPT_ORDER_EDITOR_PENDING;
+    promptOrderPendingGenerationRef.current.set(pendingKey, generation);
+    const optimisticPromptOrder = structuredClone(nextPromptOrder);
+    optimisticPromptOrderRef.current = optimisticPromptOrder;
+    queuedPromptOrderRef.current = { promptOrder: optimisticPromptOrder, generation };
+    if (mountedRef.current) {
+      setStructure((current) => current ? { ...current, promptOrder: optimisticPromptOrder } : current);
+      setPromptOrderPending(new Set(promptOrderPendingGenerationRef.current.keys()));
+      setError(null);
+    }
+
+    if (!promptOrderDrainRef.current) {
+      promptOrderDrainRef.current = drainPromptOrderChanges();
+    }
+    return promptOrderDrainRef.current;
+  }, [drainPromptOrderChanges]);
+
   const mutateStructure = useCallback(async (mutation: StructureMutation) => {
     await flushBeforeOperation();
+    await promptOrderDrainRef.current;
     const currentProject = projectRef.current;
-    const currentStructure = structureRef.current;
+    const currentStructure = currentProject
+      ? await ensureFreshStructureRevision(currentProject.id)
+      : null;
     if (!currentProject || !currentStructure) throw new Error("No project structure is currently open");
     if (mountedRef.current) {
       setStructureMutation("saving");
@@ -672,6 +833,9 @@ export function useProjectWorkspace(
       );
       projectRef.current = result.project;
       structureRef.current = result.structure;
+      structureRevisionStaleRef.current = false;
+      promptOrderRevisionStaleRef.current = false;
+      optimisticPromptOrderRef.current = result.structure.promptOrder;
       if (mountedRef.current) {
         setProject(result.project);
         setProjects((items) => mergeProjectSummary(items, result.project));
@@ -730,11 +894,12 @@ export function useProjectWorkspace(
       reportError(caught);
       throw caught;
     }
-  }, [api, applyLoadedFile, flushBeforeOperation, reportError]);
+  }, [api, applyLoadedFile, ensureFreshStructureRevision, flushBeforeOperation, reportError]);
 
   const buildProject = useCallback(
     async (input?: BuildProjectInput) => {
       await flushBeforeOperation();
+      await promptOrderDrainRef.current;
       const currentProject = projectRef.current;
       if (!currentProject) throw new Error("No project is currently open");
       try {
@@ -761,6 +926,7 @@ export function useProjectWorkspace(
     input: Omit<UpdateProjectInput, "ifProjectRevision">,
   ) => {
     await flushBeforeOperation();
+    await promptOrderDrainRef.current;
     const currentProject = projectRef.current;
     if (!currentProject) throw new Error("No project is currently open");
     try {
@@ -786,8 +952,11 @@ export function useProjectWorkspace(
 
   const createSnapshot = useCallback(async (label?: string) => {
     await flushBeforeOperation();
+    await promptOrderDrainRef.current;
     const currentProject = projectRef.current;
-    const currentStructure = structureRef.current;
+    const currentStructure = currentProject
+      ? await ensureFreshStructureRevision(currentProject.id)
+      : null;
     if (!currentProject || !currentStructure) throw new Error("No project is currently open");
     try {
       const created = await api.createSnapshot(currentProject.id, {
@@ -804,12 +973,15 @@ export function useProjectWorkspace(
       reportError(caught);
       throw caught;
     }
-  }, [api, flushBeforeOperation, reportError]);
+  }, [api, ensureFreshStructureRevision, flushBeforeOperation, reportError]);
 
   const restoreSnapshot = useCallback(async (snapshotId: string) => {
     await flushBeforeOperation();
+    await promptOrderDrainRef.current;
     const currentProject = projectRef.current;
-    const currentStructure = structureRef.current;
+    const currentStructure = currentProject
+      ? await ensureFreshStructureRevision(currentProject.id)
+      : null;
     if (!currentProject || !currentStructure) throw new Error("No project is currently open");
     try {
       const result = await api.restoreSnapshot(currentProject.id, snapshotId, currentStructure.revision);
@@ -820,6 +992,9 @@ export function useProjectWorkspace(
       const loaded = selected ? await api.getProjectFile(currentProject.id, selected.path) : null;
       projectRef.current = result.project;
       structureRef.current = result.structure;
+      structureRevisionStaleRef.current = false;
+      promptOrderRevisionStaleRef.current = false;
+      optimisticPromptOrderRef.current = result.structure.promptOrder;
       if (mountedRef.current) {
         setProject(result.project);
         setProjects((items) => mergeProjectSummary(items, result.project));
@@ -834,7 +1009,7 @@ export function useProjectWorkspace(
       reportError(caught);
       throw caught;
     }
-  }, [api, applyLoadedFile, flushBeforeOperation, reportError]);
+  }, [api, applyLoadedFile, ensureFreshStructureRevision, flushBeforeOperation, reportError]);
 
   const deleteSnapshot = useCallback(async (snapshotId: string) => {
     const currentProject = projectRef.current;
@@ -855,6 +1030,7 @@ export function useProjectWorkspace(
   const exportProject = useCallback(
     async (input?: ExportProjectInput) => {
       await flushBeforeOperation();
+      await promptOrderDrainRef.current;
       const currentProject = projectRef.current;
       if (!currentProject) throw new Error("No project is currently open");
       try {
@@ -869,6 +1045,7 @@ export function useProjectWorkspace(
 
   const downloadProjectArchive = useCallback(async () => {
     await flushBeforeOperation();
+    await promptOrderDrainRef.current;
     const currentProject = projectRef.current;
     if (!currentProject) throw new Error("No project is currently open");
     try {
@@ -895,6 +1072,11 @@ export function useProjectWorkspace(
     fileAbortRef.current = null;
     projectRef.current = null;
     structureRef.current = null;
+    structureRevisionStaleRef.current = false;
+    promptOrderRevisionStaleRef.current = false;
+    optimisticPromptOrderRef.current = [];
+    promptOrderPendingGenerationRef.current.clear();
+    queuedPromptOrderRef.current = null;
     setProject(null);
     setFiles([]);
     setStructure(null);
@@ -902,6 +1084,7 @@ export function useProjectWorkspace(
     setDiagnostics([]);
     setDiagnosticsStale(true);
     setStructureMutation("idle");
+    setPromptOrderPending(new Set());
     applyLoadedFile(null);
     setIsLoadingProject(false);
     setIsLoadingFile(false);
@@ -910,6 +1093,7 @@ export function useProjectWorkspace(
 
   const closeProject = useCallback(async () => {
     await flushBeforeOperation();
+    await promptOrderDrainRef.current;
     clearWorkspace();
     rememberClosedWorkspace();
   }, [clearWorkspace, flushBeforeOperation]);
@@ -918,6 +1102,7 @@ export function useProjectWorkspace(
     async (projectId: string) => {
       const deletingActive = projectRef.current?.id === projectId;
       if (deletingActive) {
+        await promptOrderDrainRef.current;
         clearAutosaveTimer();
         deletingProjectRef.current = projectId;
         await savePromiseRef.current?.catch(() => undefined);
@@ -1007,6 +1192,8 @@ export function useProjectWorkspace(
     structure,
     structureLoading,
     structureMutation,
+    promptOrderPending,
+    promptOrderSaving: promptOrderPending.size > 0,
     diagnostics,
     diagnosticsStale,
     snapshots,
@@ -1028,6 +1215,7 @@ export function useProjectWorkspace(
     downloadProjectArchive,
     refreshStructure,
     mutateStructure,
+    setPromptOrder,
     validateProject,
     updateProjectSettings,
     createSnapshot,

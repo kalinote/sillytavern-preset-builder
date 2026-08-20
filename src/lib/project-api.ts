@@ -166,6 +166,7 @@ export interface ProjectStructure {
   projectId: string;
   projectRevision: string;
   revision: string;
+  promptOrderRevision: string;
   prompts: PromptStructureItem[];
   regex: RegexStructureItem[];
   scripts: ScriptStructureItem[];
@@ -199,6 +200,12 @@ export interface StructureMutationResult {
   snapshot: ProjectSnapshotSummary | null;
   createdUid?: string;
   deletedUid?: string;
+}
+
+export interface PromptOrderMutationResult {
+  project: Project;
+  projectRevision: string;
+  promptOrderRevision: string;
 }
 
 export interface SnapshotRestoreResult {
@@ -367,6 +374,12 @@ export interface ProjectApi {
     mutation: StructureMutation,
     options?: ProjectRequestOptions,
   ): Promise<StructureMutationResult>;
+  setProjectPromptOrder(
+    projectId: string,
+    ifRevision: string,
+    promptOrder: JsonValue[],
+    options?: ProjectRequestOptions,
+  ): Promise<PromptOrderMutationResult>;
   listSnapshots(projectId: string, options?: ProjectRequestOptions): Promise<ProjectSnapshotSummary[]>;
   createSnapshot(
     projectId: string,
@@ -842,6 +855,7 @@ function parseProjectStructure(value: unknown): ProjectStructure {
     projectId: requiredString(value, "projectId", "structure"),
     projectRevision: requiredString(value, "projectRevision", "structure"),
     revision: requiredString(value, "revision", "structure"),
+    promptOrderRevision: requiredString(value, "promptOrderRevision", "structure"),
     prompts: value.prompts.map((item) => parseStructureItem(item, "prompt")),
     regex: value.regex.map((item) => parseStructureItem(item, "regex")),
     scripts: value.scripts.map((item) => parseStructureItem(item, "script")),
@@ -887,6 +901,17 @@ function parseMutationResult(value: unknown): StructureMutationResult {
     snapshot: value.snapshot == null ? null : parseSnapshot(value.snapshot),
     ...(typeof value.createdUid === "string" ? { createdUid: value.createdUid } : {}),
     ...(typeof value.deletedUid === "string" ? { deletedUid: value.deletedUid } : {}),
+  };
+}
+
+function parsePromptOrderMutationResult(value: unknown): PromptOrderMutationResult {
+  if (!isRecord(value)) {
+    throw new TypeError("Prompt order mutation response must be an object");
+  }
+  return {
+    project: parseProject(value.project),
+    projectRevision: requiredString(value, "projectRevision", "prompt order mutation"),
+    promptOrderRevision: requiredString(value, "promptOrderRevision", "prompt order mutation"),
   };
 }
 
@@ -1353,6 +1378,24 @@ export class ProjectApiClient implements ProjectApi {
       body: JSON.stringify({ ifRevision, mutation }),
     });
     return parseMutationResult(payload);
+  }
+
+  async setProjectPromptOrder(
+    projectId: string,
+    ifRevision: string,
+    promptOrder: JsonValue[],
+    options: ProjectRequestOptions = {},
+  ) {
+    const { payload } = await this.request(PROJECT_API_ENDPOINTS.mutations(projectId), {
+      method: "POST",
+      signal: options.signal,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ifRevision,
+        mutation: { op: "set-prompt-order", promptOrder },
+      }),
+    });
+    return parsePromptOrderMutationResult(payload);
   }
 
   async listSnapshots(projectId: string, options: ProjectRequestOptions = {}) {

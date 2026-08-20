@@ -579,6 +579,48 @@ test("schema v2 structure mutations preserve unknown fields and enforce prompt r
   });
 });
 
+test("prompt order fast path uses a file-scoped revision and preserves unknown fields", async () => {
+  await withStore(async (store, root) => {
+    const preset = fixturePreset();
+    const sourceGroup = (preset.prompt_order as JsonObject[])[0]!;
+    sourceGroup.group_note = "preserve group";
+    ((sourceGroup.order as JsonObject[])[0]!).entry_note = "preserve entry";
+    const manifest = await store.importProject({ name: "Fast prompt order", preset });
+    const initial = await store.getProjectStructure(manifest.id);
+    assert(initial.promptOrderRevision);
+
+    const nextPromptOrder = structuredClone(initial.promptOrder) as JsonObject[];
+    const nextGroup = nextPromptOrder[0]!;
+    const nextEntries = nextGroup.order as JsonObject[];
+    nextEntries[0]!.enabled = false;
+    nextGroup.order = [nextEntries[1]!, nextEntries[0]!];
+    const updated = await store.setProjectPromptOrder(manifest.id, {
+      ifRevision: initial.promptOrderRevision,
+      promptOrder: nextPromptOrder,
+    });
+
+    assert.notEqual(updated.promptOrderRevision, initial.promptOrderRevision);
+    assert.equal(updated.projectRevision, updated.project.updatedAt);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(root, manifest.id, "prompts", "prompt-order.json"), "utf8")),
+      nextPromptOrder,
+    );
+    const rebuilt = await store.getProjectStructure(manifest.id);
+    assert.equal(rebuilt.promptOrderRevision, updated.promptOrderRevision);
+    assert.notEqual(rebuilt.revision, initial.revision);
+    assert.equal(((rebuilt.promptOrder[0] as JsonObject).group_note), "preserve group");
+    assert.equal(((((rebuilt.promptOrder[0] as JsonObject).order as JsonObject[])[1]!).entry_note), "preserve entry");
+
+    await assert.rejects(
+      store.setProjectPromptOrder(manifest.id, {
+        ifRevision: initial.promptOrderRevision,
+        promptOrder: initial.promptOrder,
+      }),
+      (error: unknown) => error instanceof ApiError && error.code === "REVISION_CONFLICT",
+    );
+  });
+});
+
 test("snapshots restore complete presets and project settings use optimistic concurrency", async () => {
   await withStore(async (store) => {
     const manifest = await store.importProject({ name: "History", preset: fixturePreset() });

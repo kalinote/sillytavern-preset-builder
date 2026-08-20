@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
 import { buildPresetProject } from "./builder.js";
 import { ApiError } from "./errors.js";
-import { cloneJson, isJsonObject, stringifyJson } from "./json.js";
+import { cloneJson, isJsonObject, stableSha256, stringifyJson } from "./json.js";
 import type {
   BuildResult,
   JsonObject,
@@ -96,10 +96,14 @@ async function readMeta(projectRoot: string, kind: ProjectItemKind, uid: string)
   return meta;
 }
 
-async function readPromptOrder(projectRoot: string): Promise<JsonValue[]> {
+export async function readPromptOrder(projectRoot: string): Promise<JsonValue[]> {
   const value = await readJson<JsonValue>(join(projectRoot, "prompts", "prompt-order.json"), "prompt-order.json");
   if (!Array.isArray(value)) throw new ApiError(422, "INVALID_PROMPT_ORDER", "prompt-order.json must contain an array");
   return value;
+}
+
+export function calculatePromptOrderRevision(promptOrder: JsonValue[]): string {
+  return stableSha256(stringifyJson(promptOrder));
 }
 
 export async function readProjectStructure(
@@ -163,6 +167,7 @@ export async function readProjectStructure(
     projectId: manifest.id,
     projectRevision: manifest.updatedAt,
     revision: build.revision,
+    promptOrderRevision: calculatePromptOrderRevision(promptOrder),
     prompts,
     regex,
     scripts,
@@ -205,7 +210,7 @@ function removePromptOrderIdentifier(promptOrder: JsonValue[], identifier: strin
   }
 }
 
-function validatePromptOrder(promptOrder: JsonValue[], identifiers: string[]): void {
+export function validatePromptOrder(promptOrder: JsonValue[], identifiers: string[]): void {
   const counts = new Map<string, number>();
   for (const identifier of identifiers) counts.set(identifier, (counts.get(identifier) ?? 0) + 1);
   for (const [identifier, count] of counts) {
@@ -292,13 +297,16 @@ async function ensureManagedKind(projectRoot: string, manifest: ProjectManifest,
 
 async function identifiersFor(projectRoot: string, kind: ProjectItemKind, index: OrderedIndex<AnyIndexItem>): Promise<string[]> {
   const key = kind === "prompt" ? "identifier" : "id";
-  const output: string[] = [];
-  for (const item of index.items) {
+  const values = await Promise.all(index.items.map(async (item) => {
     const meta = await readMeta(projectRoot, kind, item.uid);
     const value = meta[key];
-    if (typeof value === "string" && value) output.push(value);
-  }
-  return output;
+    return typeof value === "string" && value ? value : undefined;
+  }));
+  return values.filter((value): value is string => value !== undefined);
+}
+
+export async function readPromptIdentifiers(projectRoot: string): Promise<string[]> {
+  return identifiersFor(projectRoot, "prompt", await readIndex(projectRoot, "prompt"));
 }
 
 function updateIndexMetadata(kind: ProjectItemKind, item: AnyIndexItem, meta: JsonObject): void {

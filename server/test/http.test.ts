@@ -511,8 +511,37 @@ test("HTTP v0.2 structure, settings, snapshots, and validation APIs form a compl
     const structureResponse = await fetch(`${base}/api/projects/${imported.project.id}/structure`);
     assert.equal(structureResponse.status, 200);
     let structure = (await structureResponse.json() as {
-      structure: { revision: string; prompts: Array<{ uid: string }>; regex: unknown[] };
+      structure: {
+        revision: string;
+        promptOrderRevision: string;
+        promptOrder: Array<{ character_id: number; order: Array<{ identifier: string; enabled: boolean }> }>;
+        prompts: Array<{ uid: string }>;
+        regex: unknown[];
+      };
     }).structure;
+    const promptOrderResponse = await fetch(`${base}/api/projects/${imported.project.id}/structure/mutations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ifRevision: structure.promptOrderRevision,
+        mutation: {
+          op: "set-prompt-order",
+          promptOrder: [{ character_id: 100001, order: [{ identifier: "main", enabled: false }] }],
+        },
+      }),
+    });
+    assert.equal(promptOrderResponse.status, 200);
+    const promptOrderResult = await promptOrderResponse.json() as Record<string, unknown>;
+    assert.equal(typeof promptOrderResult.promptOrderRevision, "string");
+    assert.equal("promptOrder" in promptOrderResult, false);
+    assert.equal("files" in promptOrderResult, false);
+    assert.equal("structure" in promptOrderResult, false);
+    assert.equal("build" in promptOrderResult, false);
+
+    structure = (await (await fetch(`${base}/api/projects/${imported.project.id}/structure`)).json() as {
+      structure: typeof structure;
+    }).structure;
+    assert.equal(structure.promptOrder[0]!.order[0]!.enabled, false);
     const createResponse = await fetch(`${base}/api/projects/${imported.project.id}/structure/mutations`, {
       method: "POST",
       headers: { "content-type": "application/json" },

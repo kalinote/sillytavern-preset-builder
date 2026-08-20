@@ -200,6 +200,7 @@ export interface ProjectStructure {
   projectId: string;
   projectRevision: string;
   revision: string;
+  promptOrderRevision: string;
   prompts: PromptStructureItem[];
   regex: RegexStructureItem[];
   scripts: ScriptStructureItem[];
