@@ -336,6 +336,26 @@ export function useProjectWorkspace(
           }
         }
 
+        if (savedPath === "project.json") {
+          // project.json is editable like any other workspace file, but its
+          // fields also back the project header and project list.
+          const updatedProject = await api.getProject(savedProjectId).catch(() => null);
+          if (updatedProject && projectRef.current?.id === savedProjectId) {
+            projectRef.current = updatedProject;
+            if (structureRef.current) {
+              structureRef.current = {
+                ...structureRef.current,
+                projectRevision: updatedProject.updatedAt,
+              };
+            }
+            if (mountedRef.current) {
+              setProject(updatedProject);
+              setProjects((projects) => mergeProjectSummary(projects, updatedProject));
+              setStructure(structureRef.current);
+            }
+          }
+        }
+
         if (
           projectRef.current?.id === savedProjectId &&
           current?.path === savedPath

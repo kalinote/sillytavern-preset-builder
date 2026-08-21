@@ -15,6 +15,7 @@ import type { ProjectStructure, StructureMutation } from "../../lib/project-api"
 import { AdaptiveCodeEditor } from "../editor";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { ProjectConfigForm, RequestConfigForm } from "./config-form-editors";
 import { PromptOrderEditor } from "./prompt-order-editor";
 
 export type SaveState = "saved" | "saving" | "dirty" | "error";
@@ -60,9 +61,17 @@ export function WorkspaceEditorPane({
   const readOnly = path.startsWith("output/") || path.startsWith("snapshots/");
   const FileIcon = iconFromLanguage(language);
   const promptOrderFile = path === "prompts/prompt-order.json";
+  const configFormKind = path === "project.json"
+    ? "project"
+    : path === "preset.base.json" || path === "preset.json"
+      ? "request"
+      : null;
   const displayPath = useMemo(() => formatEditorPath(path, structure), [path, structure]);
   const [promptOrderMode, setPromptOrderMode] = useState<"source" | "structured">("source");
+  const [configMode, setConfigMode] = useState<"form" | "json">("form");
   useEffect(() => setPromptOrderMode("source"), [path]);
+  useEffect(() => setConfigMode("form"), [path]);
+  const sourceEditorVisible = !configFormKind || configMode === "json";
 
   return (
     <main
@@ -94,8 +103,8 @@ export function WorkspaceEditorPane({
             {displayPath}
           </p>
         </div>
-        <Badge variant="blue">{editorLabel(language)}</Badge>
-        {largeFile && <Badge variant="amber">大文件模式</Badge>}
+        <Badge variant="blue">{sourceEditorVisible ? editorLabel(language) : "Form"}</Badge>
+        {largeFile && sourceEditorVisible && <Badge variant="amber">大文件模式</Badge>}
         {readOnly && <Badge>只读</Badge>}
         {saveMode === "explicit" ? (
           <Button
@@ -113,6 +122,12 @@ export function WorkspaceEditorPane({
             <Button variant={promptOrderMode === "structured" ? "secondary" : "ghost"} size="sm" className="h-7" onClick={() => setPromptOrderMode("structured")}>结构化</Button>
           </div>
         ) : null}
+        {configFormKind ? (
+          <div className="flex rounded-lg border border-border bg-muted/40 p-0.5" aria-label="编辑模式">
+            <Button variant={configMode === "form" ? "secondary" : "ghost"} size="sm" className="h-7" onClick={() => setConfigMode("form")}>表单</Button>
+            <Button variant={configMode === "json" ? "secondary" : "ghost"} size="sm" className="h-7" onClick={() => setConfigMode("json")}>JSON</Button>
+          </div>
+        ) : null}
       </div>
 
       {saveMode === "explicit" ? (
@@ -122,7 +137,7 @@ export function WorkspaceEditorPane({
         </div>
       ) : null}
 
-      {largeFile && (
+      {largeFile && sourceEditorVisible && (
         <div className="flex shrink-0 items-center gap-2 border-b border-warning/20 bg-warning-soft/70 px-3 py-2 text-xs text-warning">
           <AlertTriangle className="size-3.5" />
           已关闭 minimap、部分语义检查和自动格式化，以保持大文件输入流畅。
@@ -146,7 +161,7 @@ export function WorkspaceEditorPane({
           ) {
             return;
           }
-          if (saveMode === "auto") onFlush();
+          if (saveMode === "auto") queueMicrotask(onFlush);
         }}
       >
         {promptOrderFile && promptOrderMode === "structured" && structure && onMutateStructure ? (
@@ -155,6 +170,10 @@ export function WorkspaceEditorPane({
             busy={structureBusy}
             onSave={(promptOrder) => onMutateStructure({ op: "set-prompt-order", promptOrder })}
           />
+        ) : configFormKind === "request" && configMode === "form" ? (
+          <RequestConfigForm content={content} onChange={onChange} />
+        ) : configFormKind === "project" && configMode === "form" ? (
+          <ProjectConfigForm content={content} onChange={onChange} />
         ) : (
           <AdaptiveCodeEditor
             key={path}

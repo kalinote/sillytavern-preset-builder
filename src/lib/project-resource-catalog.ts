@@ -245,7 +245,7 @@ export function buildProjectResourceCatalog(
       continue;
     }
     if (file.path === "preset.base.json") {
-      addFile(file, "shared/config/preset.base.json", "shared", "config", "未拆分字段与插件配置");
+      addFile(file, "core/config/preset.base.json", "core", "config", "请求参数与插件配置");
       continue;
     }
     if (file.path === "project.json") {
