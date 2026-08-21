@@ -11,6 +11,28 @@ interface ConfigFormProps {
   onChange: (content: string) => void;
 }
 
+const PRESET_PROMPT_FIELDS = [
+  { key: "impersonation_prompt", label: "角色扮演提示词", description: "继续对话时要求模型扮演用户的提示词" },
+  { key: "new_chat_prompt", label: "新对话提示词", description: "开始普通新对话时附加" },
+  { key: "new_group_chat_prompt", label: "新群聊提示词", description: "开始群组对话时附加" },
+  { key: "new_example_chat_prompt", label: "示例对话提示词", description: "示例消息区段使用的提示词" },
+  { key: "continue_nudge_prompt", label: "继续生成提示词", description: "请求模型从截断处继续生成" },
+  { key: "group_nudge_prompt", label: "群聊角色提示词", description: "指定群聊中的下一位回复角色" },
+  { key: "send_if_empty", label: "空输入替代文本", description: "用户输入为空时发送给模型的内容" },
+] as const;
+
+const PRESET_FORMAT_FIELDS = [
+  { key: "wi_format", label: "世界信息标签", description: "世界书内容的包装格式，使用 {0} 作为内容占位符" },
+  { key: "scenario_format", label: "场景标签", description: "场景内容的包装格式，可使用 {{scenario}}" },
+  { key: "personality_format", label: "性格标签", description: "角色性格的包装格式，可使用 {{personality}}" },
+] as const;
+
+const PRESET_PREFILL_FIELDS = [
+  { key: "assistant_prefill", label: "Assistant Prefill", description: "普通回复前预填的 assistant 内容" },
+  { key: "assistant_impersonation", label: "扮演模式 Prefill", description: "扮演用户时预填的 assistant 内容" },
+  { key: "continue_postfix", label: "继续生成后缀", description: "继续生成请求附加的文本" },
+] as const;
+
 export function RequestConfigForm({ content, onChange }: ConfigFormProps) {
   const parsed = useMemo(() => parseObject(content), [content]);
   if (!parsed.value) return <InvalidJsonState error={parsed.error} />;
@@ -25,7 +47,7 @@ export function RequestConfigForm({ content, onChange }: ConfigFormProps) {
   };
 
   return (
-    <FormScroller title="请求参数" description="常用请求字段以表单呈现；未列出的字段会继续保留在 JSON 中。">
+    <FormScroller title="请求参数与基本配置" description="常用请求字段以表单呈现；提示词、标签和 extensions 不会出现在这个板块中。">
       <FormSection title="模型与来源" description="模型字段会跟随当前 Chat Completion 来源。">
         <div className="grid gap-4 md:grid-cols-2">
           <TextSetting
@@ -146,6 +168,46 @@ export function RequestConfigForm({ content, onChange }: ConfigFormProps) {
             onCheckedChange={(checked) => update("show_thoughts", checked)}
           />
         </div>
+      </FormSection>
+    </FormScroller>
+  );
+}
+
+export function PromptFieldsConfigForm({ content, onChange }: ConfigFormProps) {
+  const parsed = useMemo(() => parseObject(content), [content]);
+  if (!parsed.value) return <InvalidJsonState error={parsed.error} />;
+
+  const config = parsed.value;
+  const update = (key: string, value: string) => {
+    onChange(updateObject(content, (next) => {
+      next[key] = value;
+    }));
+  };
+
+  const renderFields = (fields: typeof PRESET_PROMPT_FIELDS | typeof PRESET_FORMAT_FIELDS | typeof PRESET_PREFILL_FIELDS) => (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {fields.map((field) => (
+        <TextareaSetting
+          key={`${field.key}:${stringValue(config[field.key])}`}
+          label={field.label}
+          description={`${field.description} · ${field.key}`}
+          value={stringValue(config[field.key])}
+          onCommit={(value) => update(field.key, value)}
+        />
+      ))}
+    </div>
+  );
+
+  return (
+    <FormScroller title="预设提示词与标签" description="集中编辑 SillyTavern 顶层提示词、包装标签与预填内容；此板块不包含 extensions。">
+      <FormSection title="对话提示词" description="控制新对话、继续生成和角色扮演等请求附加内容。">
+        {renderFields(PRESET_PROMPT_FIELDS)}
+      </FormSection>
+      <FormSection title="内容包装与标签" description="保留模板变量和占位符，构建时会原样写回预设。">
+        {renderFields(PRESET_FORMAT_FIELDS)}
+      </FormSection>
+      <FormSection title="预填与后缀">
+        {renderFields(PRESET_PREFILL_FIELDS)}
       </FormSection>
     </FormScroller>
   );
@@ -304,6 +366,42 @@ function TextSetting({
         onBlur={commit}
         onKeyDown={(event) => {
           if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            setDraft(value);
+            event.currentTarget.blur();
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+function TextareaSetting({
+  label,
+  description,
+  value,
+  onCommit,
+}: {
+  label: string;
+  description?: string;
+  value: string;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const commit = () => {
+    if (draft !== value) onCommit(draft);
+  };
+  return (
+    <label className="block space-y-1.5 text-xs font-medium">
+      <span>{label}</span>
+      {description ? <span className="block text-[10px] font-normal text-muted-foreground">{description}</span> : null}
+      <textarea
+        className="min-h-32 w-full resize-y rounded-lg border border-input bg-surface px-3 py-2 font-mono text-xs leading-5 text-foreground shadow-xs outline-none transition-colors placeholder:text-muted-foreground focus:border-primary/50 focus:ring-2 focus:ring-ring/20"
+        value={draft}
+        aria-label={label}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
           if (event.key === "Escape") {
             setDraft(value);
             event.currentTarget.blur();

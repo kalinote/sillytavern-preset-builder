@@ -41,7 +41,7 @@ export interface ProjectManifest {
   preview: ProjectPreviewSettings;
   regexMirrorBinding?: RegexMirrorBinding;
   preservation: {
-    unknownFields: "preset.base.json";
+    unknownFields: "preset.settings.json";
     semanticRoundTrip: true;
   };
 }
@@ -193,7 +193,7 @@ export interface ProjectPluginSummary {
   displayName: string;
   extensionKey: string;
   known: boolean;
-  configSourcePath: "preset.base.json";
+  configSourcePath: string;
 }
 
 export interface ProjectStructure {

@@ -12,7 +12,7 @@ async function readJsonFile(request: APIRequestContext, projectId: string, path:
   return JSON.parse(content) as Record<string, unknown>;
 }
 
-test("request and project JSON files support form editing without dropping unknown fields", async ({ page, request }) => {
+test("settings, prompt fields, and project files support direct form editing", async ({ page, request }) => {
   const name = `Config form ${Date.now()}`;
   const imported = await request.post(`${STUDIO_ORIGIN}/api/projects/import/json`, {
     data: {
@@ -33,10 +33,14 @@ test("request and project JSON files support form editing without dropping unkno
         repetition_penalty: 1,
         function_calling: true,
         enable_web_search: false,
+        impersonation_prompt: "Write as {{user}}",
+        new_chat_prompt: "Start a new conversation",
+        wi_format: "<world>{0}</world>",
+        scenario_format: "<scenario>{{scenario}}</scenario>",
         custom_request_field: { keep: true },
         prompts: [],
         prompt_order: [],
-        extensions: {},
+        extensions: { custom_plugin: { keep: true } },
       },
     },
   });
@@ -48,10 +52,10 @@ test("request and project JSON files support form editing without dropping unkno
   await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
 
   const search = page.getByPlaceholder("搜索工程文件或条目…");
-  await search.fill("请求参数与插件配置");
-  await page.locator('[data-source-path="preset.base.json"]').click();
+  await search.fill("请求参数与基本配置");
+  await page.locator('[data-source-path="preset.settings.json"]').click();
 
-  await expect(page.getByRole("heading", { name: "请求参数" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "请求参数与基本配置" })).toBeVisible();
   await expect(page.getByRole("button", { name: "表单", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "JSON", exact: true })).toBeVisible();
 
@@ -62,24 +66,67 @@ test("request and project JSON files support form editing without dropping unkno
   await page.getByRole("switch", { name: "流式输出" }).click();
 
   await expect.poll(async () => {
-    const config = await readJsonFile(request, projectId, "preset.base.json");
+    const config = await readJsonFile(request, projectId, "preset.settings.json");
     return {
       context: config.openai_max_context,
       output: config.openai_max_tokens,
       stream: config.stream_openai,
       unknown: config.custom_request_field,
+      extensions: config.extensions,
+      prompt: config.impersonation_prompt,
     };
   }).toEqual({
     context: 256000,
     output: 16384,
     stream: false,
     unknown: { keep: true },
+    extensions: undefined,
+    prompt: undefined,
   });
 
   await page.getByRole("button", { name: "JSON", exact: true }).click();
-  await expect(page.getByRole("region", { name: "preset.base.json 源码编辑器容器", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "preset.settings.json 源码编辑器容器", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "表单", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "请求参数" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "请求参数与基本配置" })).toBeVisible();
+
+  await search.fill("预设提示词与标签");
+  await page.locator('[data-source-path="preset.prompt-fields.json"]').click();
+  await expect(page.getByRole("heading", { name: "预设提示词与标签" })).toBeVisible();
+  await page.getByLabel("角色扮演提示词").fill("Edited impersonation prompt");
+  await page.getByLabel("角色扮演提示词").press("Tab");
+  await page.getByLabel("世界信息标签").fill("<world-info>{0}</world-info>");
+  await page.getByLabel("世界信息标签").press("Tab");
+
+  await expect.poll(async () => {
+    const promptFields = await readJsonFile(request, projectId, "preset.prompt-fields.json");
+    return {
+      impersonation: promptFields.impersonation_prompt,
+      worldInfo: promptFields.wi_format,
+      extensions: promptFields.extensions,
+      temperature: promptFields.temperature,
+    };
+  }).toEqual({
+    impersonation: "Edited impersonation prompt",
+    worldInfo: "<world-info>{0}</world-info>",
+    extensions: undefined,
+    temperature: undefined,
+  });
+
+  const builtResponse = await request.post(`${STUDIO_ORIGIN}/api/projects/${projectId}/build`, { data: {} });
+  const built = await builtResponse.json() as { preset: Record<string, unknown> };
+  expect(built.preset.impersonation_prompt).toBe("Edited impersonation prompt");
+  expect(built.preset.extensions).toEqual({ custom_plugin: { keep: true } });
+
+  const customPluginPath = `extensions/ext-${Buffer.from("custom_plugin", "utf8").toString("base64url")}.json`;
+  await search.fill("custom_plugin 配置");
+  const customPluginFile = page.locator(`[data-source-path="${customPluginPath}"]`);
+  await expect(customPluginFile).toHaveCount(1);
+  await customPluginFile.click();
+  await expect(page.getByRole("region", {
+    name: `${customPluginPath.split("/").at(-1)} 源码编辑器容器`,
+    exact: true,
+  })).toBeVisible();
+  expect(await readJsonFile(request, projectId, customPluginPath)).toEqual({ keep: true });
 
   await search.fill("工程配置");
   await page.locator('[data-source-path="project.json"]').click();

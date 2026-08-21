@@ -502,24 +502,24 @@ function clearStSessionCookie(response: ServerResponse, request: IncomingMessage
 
 function secretString(value: unknown, field: string, maxLength = 1024): string {
   if (typeof value !== "string" || !value || value.length > maxLength) {
-    throw new ApiError(400, "INVALID_INPUT", `${field} must be a non-empty string of at most ${maxLength} characters`);
+    throw new ApiError(400, "INVALID_INPUT", `${field} 必须是非空字符串，且不能超过 ${maxLength} 个字符。`);
   }
   return value;
 }
 
 function secretPassword(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length > 4096) {
-    throw new ApiError(400, "INVALID_INPUT", `${field} must be a string of at most 4096 characters`);
+    throw new ApiError(400, "INVALID_INPUT", `${field} 必须是字符串，且不能超过 4096 个字符。`);
   }
   return value;
 }
 
 function parseStSessionInput(value: unknown): CreateStSessionInput {
-  if (!isJsonObject(value)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+  if (!isJsonObject(value)) throw new ApiError(400, "INVALID_INPUT", "请求体必须是对象。");
   const origin = secretString(value.origin, "origin", 2048);
   let basicAuth: CreateStSessionInput["basicAuth"];
   if (value.basicAuth !== undefined) {
-    if (!isJsonObject(value.basicAuth)) throw new ApiError(400, "INVALID_INPUT", "basicAuth must be an object");
+    if (!isJsonObject(value.basicAuth)) throw new ApiError(400, "INVALID_INPUT", "basicAuth 必须是对象。");
     basicAuth = {
       username: secretString(value.basicAuth.username, "basicAuth.username", 256),
       password: secretPassword(value.basicAuth.password, "basicAuth.password"),
@@ -527,7 +527,7 @@ function parseStSessionInput(value: unknown): CreateStSessionInput {
   }
   let accountAuth: CreateStSessionInput["accountAuth"];
   if (value.accountAuth !== undefined) {
-    if (!isJsonObject(value.accountAuth)) throw new ApiError(400, "INVALID_INPUT", "accountAuth must be an object");
+    if (!isJsonObject(value.accountAuth)) throw new ApiError(400, "INVALID_INPUT", "accountAuth 必须是对象。");
     accountAuth = {
       handle: secretString(value.accountAuth.handle, "accountAuth.handle", 256),
       password: secretPassword(value.accountAuth.password, "accountAuth.password"),
@@ -728,7 +728,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
       if (pathname === "/api/st/session/check" && request.method === "POST") {
         const body = await readRequestBody(request, 16 * 1024);
         if (body.length > 0 && !isJsonObject(parseJsonBuffer(body))) {
-          throw new ApiError(400, "INVALID_INPUT", "Session check body must be an object when provided");
+          throw new ApiError(400, "INVALID_INPUT", "连接检查的请求体必须是对象。");
         }
         const session = await stSessions.checkSession(cookieValue(request, ST_SESSION_COOKIE));
         sendJson(response, 200, { session });
@@ -748,7 +748,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
       }
       if (pathname === "/api/st/presets/read" && request.method === "POST") {
         const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
-        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "请求体必须是对象。");
         sendJson(response, 200, await stSessions.readPreset(cookieValue(request, ST_SESSION_COOKIE), body.name));
         return;
       }
@@ -790,7 +790,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
       }
       if (pathname === "/api/projects/create-from-st" && request.method === "POST") {
         const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
-        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "请求体必须是对象。");
         const result = await stSessions.createProjectFromSt(cookieValue(request, ST_SESSION_COOKIE), {
           presetName: body.presetName,
           ...(typeof body.name === "string" ? { name: body.name } : {}),
@@ -804,7 +804,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
       const pushPreviewMatch = /^\/api\/projects\/([^/]+)\/push-preview$/.exec(pathname);
       if (pushPreviewMatch && request.method === "POST") {
         const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
-        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "请求体必须是对象。");
         const preview = await stSessions.previewPush(
           cookieValue(request, ST_SESSION_COOKIE),
           pushPreviewMatch[1] as string,
@@ -817,7 +817,7 @@ export function createApiServer(options: ApiServerOptions = {}): {
       const pushPresetMatch = /^\/api\/projects\/([^/]+)\/push-preset$/.exec(pathname);
       if (pushPresetMatch && request.method === "POST") {
         const body = parseJsonBuffer(await readRequestBody(request, 16 * 1024));
-        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "Request body must be an object");
+        if (!isJsonObject(body)) throw new ApiError(400, "INVALID_INPUT", "请求体必须是对象。");
         const result = await stSessions.commitPush(
           cookieValue(request, ST_SESSION_COOKIE),
           pushPresetMatch[1] as string,

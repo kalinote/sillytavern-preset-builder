@@ -1,7 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { ApiError } from "./errors.js";
+import { EXTENSIONS_DIRECTORY, extensionKeyFromConfigPath } from "./extension-config.js";
 import { cloneJson, getAtPath, isJsonObject, stableSha256 } from "./json.js";
+import { PRESET_PROMPT_FIELD_SET } from "./preset-config.js";
 import type {
   BuildResult,
   Diagnostic,
@@ -35,6 +37,36 @@ async function readJson<T>(path: string, label: string): Promise<T> {
       cause: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+async function buildExtensions(projectRoot: string): Promise<JsonObject> {
+  let entries;
+  try {
+    entries = await readdir(join(projectRoot, EXTENSIONS_DIRECTORY), { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ApiError(422, "MISSING_PROJECT_FILE", `Missing ${EXTENSIONS_DIRECTORY}`, {
+        path: join(projectRoot, EXTENSIONS_DIRECTORY),
+      });
+    }
+    throw error;
+  }
+
+  const configFiles = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({
+      extensionKey: extensionKeyFromConfigPath(`${EXTENSIONS_DIRECTORY}/${entry.name}`),
+      path: join(projectRoot, EXTENSIONS_DIRECTORY, entry.name),
+    }))
+    .filter((entry): entry is { extensionKey: string; path: string } => entry.extensionKey !== undefined)
+    .sort((left, right) => left.extensionKey.localeCompare(right.extensionKey));
+  const configs = await Promise.all(configFiles.map(async ({ extensionKey, path }) => ({
+    extensionKey,
+    value: await readJson<JsonValue>(path, `extension ${extensionKey}`),
+  })));
+  const extensions: JsonObject = {};
+  for (const config of configs) extensions[config.extensionKey] = config.value;
+  return extensions;
 }
 
 function assertIndex<T>(value: OrderedIndex<T>, label: string): void {
@@ -228,9 +260,31 @@ export async function buildPresetProject(projectRoot: string): Promise<BuildResu
   if (manifest.schemaVersion !== 2) {
     throw new ApiError(422, "UNSUPPORTED_PROJECT", "Unsupported project schema version");
   }
-  const base = await readJson<JsonObject>(join(projectRoot, "preset.base.json"), "preset.base.json");
-  if (!isJsonObject(base)) throw new ApiError(422, "INVALID_PROJECT_JSON", "preset.base.json must be an object");
-  const preset = cloneJson(base);
+  const [settings, promptFields, extensions] = await Promise.all([
+    readJson<JsonObject>(join(projectRoot, "preset.settings.json"), "preset.settings.json"),
+    readJson<JsonObject>(join(projectRoot, "preset.prompt-fields.json"), "preset.prompt-fields.json"),
+    buildExtensions(projectRoot),
+  ]);
+  if (!isJsonObject(settings)) throw new ApiError(422, "INVALID_PROJECT_JSON", "preset.settings.json must be an object");
+  if (!isJsonObject(promptFields)) throw new ApiError(422, "INVALID_PROJECT_JSON", "preset.prompt-fields.json must be an object");
+  for (const key of ["extensions", "prompts", "prompt_order"]) {
+    if (Object.hasOwn(settings, key)) {
+      throw new ApiError(422, "INVALID_PROJECT_JSON", `preset.settings.json cannot contain ${key}`);
+    }
+  }
+  for (const key of PRESET_PROMPT_FIELD_SET) {
+    if (Object.hasOwn(settings, key)) {
+      throw new ApiError(422, "INVALID_PROJECT_JSON", `${key} belongs in preset.prompt-fields.json`);
+    }
+  }
+  for (const [key, value] of Object.entries(promptFields)) {
+    if (!PRESET_PROMPT_FIELD_SET.has(key) || typeof value !== "string") {
+      throw new ApiError(422, "INVALID_PROJECT_JSON", `preset.prompt-fields.json contains unsupported field ${key}`);
+    }
+  }
+  const preset = cloneJson(settings);
+  for (const [key, value] of Object.entries(promptFields)) preset[key] = cloneJson(value);
+  preset.extensions = cloneJson(extensions);
   const diagnostics: Diagnostic[] = [];
 
   const prompts = manifest.managedPaths.prompts ? await buildPrompts(projectRoot) : [];
@@ -255,14 +309,14 @@ export async function buildPresetProject(projectRoot: string): Promise<BuildResu
       code: "REGEX_MIRROR_CONFLICT_PRESERVED",
       message: manifest.managedPaths.regex
         ? `Conflicting Regex mirrors were preserved; edits only update ${manifest.regexMirrorBinding.authority}`
-        : "Conflicting Regex mirrors were preserved in preset.base.json and are not linked",
+        : "Conflicting Regex mirrors were preserved in their extension config files and are not linked",
     });
   }
 
   if (manifest.managedPaths.scripts) {
     const helper = getAtPath(preset, ["extensions", "tavern_helper"]);
     if (!isJsonObject(helper)) {
-      throw new ApiError(422, "SCRIPT_TARGET_MISSING", "extensions.tavern_helper is missing from preset.base.json");
+      throw new ApiError(422, "SCRIPT_TARGET_MISSING", "tavern_helper extension config is missing");
     }
     helper.scripts = await buildScripts(projectRoot);
   }

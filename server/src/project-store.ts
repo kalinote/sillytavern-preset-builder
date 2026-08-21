@@ -10,6 +10,7 @@ import {
 import { atomicWriteFile } from "./atomic.js";
 import { buildPresetProject } from "./builder.js";
 import { ApiError } from "./errors.js";
+import { extensionConfigPath } from "./extension-config.js";
 import { cloneJson, firstSemanticDifference, isJsonObject, semanticEqual, stableSha256, stringifyJson } from "./json.js";
 import { installManagedSources, stageManagedSources } from "./managed-source-transaction.js";
 import {
@@ -55,6 +56,24 @@ async function readJsonObject(path: string, label: string): Promise<JsonObject> 
   let value: unknown;
   try {
     value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch {
+    throw new ApiError(422, "INVALID_PROJECT", `${label} is not valid JSON`);
+  }
+  if (!isJsonObject(value)) throw new ApiError(422, "INVALID_PROJECT", `${label} must contain an object`);
+  return value;
+}
+
+async function readOptionalJsonObject(path: string, label: string): Promise<JsonObject | undefined> {
+  let source: string;
+  try {
+    source = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(source) as unknown;
   } catch {
     throw new ApiError(422, "INVALID_PROJECT", `${label} is not valid JSON`);
   }
@@ -392,9 +411,10 @@ export class ProjectStore {
         }
       }
 
-      const base = await readJsonObject(join(projectRoot, "preset.base.json"), "preset.base.json");
-      const extensions = isJsonObject(base.extensions) ? base.extensions : undefined;
-      const spreset = extensions && isJsonObject(extensions.SPreset) ? extensions.SPreset : undefined;
+      const spreset = await readOptionalJsonObject(
+        join(projectRoot, extensionConfigPath("SPreset")),
+        "SPreset extension config",
+      );
       const promptTemplateHints = ["ChatSquash", "MacroNest", "RegexBinding"]
         .filter((name) => spreset && Object.hasOwn(spreset, name));
 

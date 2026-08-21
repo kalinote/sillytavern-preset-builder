@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
 import { ApiError } from "./errors.js";
+import { EXTENSIONS_DIRECTORY, extensionConfigPath } from "./extension-config.js";
 import {
   cloneJson,
   getAtPath,
@@ -11,6 +12,7 @@ import {
   stableSha256,
   stringifyJson,
 } from "./json.js";
+import { PRESET_PROMPT_FIELD_KEYS } from "./preset-config.js";
 import type {
   ImportProjectInput,
   JsonObject,
@@ -162,7 +164,7 @@ function makeManifest(
     },
     ...(regexDetection ? { regexMirrorBinding: regexDetection.binding } : {}),
     preservation: {
-      unknownFields: "preset.base.json",
+      unknownFields: "preset.settings.json",
       semanticRoundTrip: true,
     },
   };
@@ -294,40 +296,51 @@ export async function splitPresetProject(
 ): Promise<ProjectManifest> {
   assertChatCompletionPreset(input.preset);
   const original = cloneJson(input.preset);
-  const base = cloneJson(input.preset);
+  const settings = cloneJson(input.preset);
+  const promptFields: JsonObject = {};
+  const extensions = isJsonObject(original.extensions) ? cloneJson(original.extensions) : {};
   const regexDetection = detectRegexMirrors(original);
   const scripts = getAtPath(original, ["extensions", "tavern_helper", "scripts"]);
   const manifest = makeManifest(id, input, original, regexDetection);
 
-  delete base.prompts;
-  delete base.prompt_order;
+  delete settings.prompts;
+  delete settings.prompt_order;
+  delete settings.extensions;
+  for (const key of PRESET_PROMPT_FIELD_KEYS) {
+    if (!Object.hasOwn(settings, key)) continue;
+    promptFields[key] = cloneJson(settings[key] as JsonValue);
+    delete settings[key];
+  }
 
   if (manifest.managedPaths.regex && regexDetection?.binding.consistent) {
-    const extensions = base.extensions;
-    if (isJsonObject(extensions) && Array.isArray(extensions.regex_scripts)) extensions.regex_scripts = [];
-    const binding = getAtPath(base, ["extensions", "SPreset", "RegexBinding"]);
+    if (Array.isArray(extensions.regex_scripts)) extensions.regex_scripts = [];
+    const binding = getAtPath(extensions, ["SPreset", "RegexBinding"]);
     if (isJsonObject(binding) && Array.isArray(binding.regexes)) binding.regexes = [];
   } else if (
     manifest.managedPaths.regex &&
     regexDetection?.binding.authority === "extensions.regex_scripts"
   ) {
-    const extensions = base.extensions;
-    if (isJsonObject(extensions) && Array.isArray(extensions.regex_scripts)) extensions.regex_scripts = [];
+    if (Array.isArray(extensions.regex_scripts)) extensions.regex_scripts = [];
   }
   if (manifest.managedPaths.scripts) {
-    const helper = getAtPath(base, ["extensions", "tavern_helper"]);
+    const helper = getAtPath(extensions, ["tavern_helper"]);
     if (isJsonObject(helper)) helper.scripts = [];
   }
 
   await mkdir(projectRoot, { recursive: true });
   await Promise.all([
+    mkdir(join(projectRoot, EXTENSIONS_DIRECTORY), { recursive: true }),
     mkdir(join(projectRoot, "snapshots"), { recursive: true }),
     mkdir(join(projectRoot, "recovery"), { recursive: true }),
     mkdir(join(projectRoot, "output"), { recursive: true }),
   ]);
   const snapshotIndex: SnapshotIndex = { schemaVersion: 1, items: [] };
   await writeJson(join(projectRoot, "snapshots", "index.json"), snapshotIndex as unknown as JsonValue);
-  await writeJson(join(projectRoot, "preset.base.json"), base);
+  await writeJson(join(projectRoot, "preset.settings.json"), settings);
+  await writeJson(join(projectRoot, "preset.prompt-fields.json"), promptFields);
+  await Promise.all(Object.entries(extensions).map(([extensionKey, value]) => (
+    writeJson(join(projectRoot, extensionConfigPath(extensionKey)), value)
+  )));
   await splitPrompts(projectRoot, original.prompts as JsonValue[], regexDetection);
   await writeJson(join(projectRoot, "prompts", "prompt-order.json"), original.prompt_order as JsonValue);
   if (manifest.managedPaths.regex && regexDetection) await splitRegex(projectRoot, regexDetection.regexes);

@@ -15,7 +15,7 @@ import type { ProjectStructure, StructureMutation } from "../../lib/project-api"
 import { AdaptiveCodeEditor } from "../editor";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { ProjectConfigForm, RequestConfigForm } from "./config-form-editors";
+import { ProjectConfigForm, PromptFieldsConfigForm, RequestConfigForm } from "./config-form-editors";
 import { PromptOrderEditor } from "./prompt-order-editor";
 
 export type SaveState = "saved" | "saving" | "dirty" | "error";
@@ -63,7 +63,9 @@ export function WorkspaceEditorPane({
   const promptOrderFile = path === "prompts/prompt-order.json";
   const configFormKind = path === "project.json"
     ? "project"
-    : path === "preset.base.json" || path === "preset.json"
+    : path === "preset.prompt-fields.json"
+      ? "prompt-fields"
+      : path === "preset.settings.json"
       ? "request"
       : null;
   const displayPath = useMemo(() => formatEditorPath(path, structure), [path, structure]);
@@ -174,6 +176,8 @@ export function WorkspaceEditorPane({
           <RequestConfigForm content={content} onChange={onChange} />
         ) : configFormKind === "project" && configMode === "form" ? (
           <ProjectConfigForm content={content} onChange={onChange} />
+        ) : configFormKind === "prompt-fields" && configMode === "form" ? (
+          <PromptFieldsConfigForm content={content} onChange={onChange} />
         ) : (
           <AdaptiveCodeEditor
             key={path}

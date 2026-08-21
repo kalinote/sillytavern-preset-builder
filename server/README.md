@@ -39,7 +39,7 @@ pnpm --dir server start
 
 ### SillyTavern 直连
 
-- `PRESET_STUDIO_ST_TARGET_POLICY`：ST 目标策略，取值 `allowlist`、`private` 或 `any`，默认 `allowlist`。
+- `PRESET_STUDIO_ST_TARGET_POLICY`：ST 目标策略，取值 `allowlist`、`private` 或 `any`，默认 `any`。
 - `PRESET_STUDIO_ST_ALLOWED_ORIGINS`：精确允许的 ST HTTP(S) Origin，逗号分隔；默认空。
 - `PRESET_STUDIO_ST_CONNECT_TIMEOUT_MS`：建立 ST 网络连接的超时，默认 `10000` ms。
 - `PRESET_STUDIO_ST_REQUEST_TIMEOUT_MS`：单次 ST 请求的总超时，默认 `30000` ms。
@@ -48,9 +48,9 @@ pnpm --dir server start
 
 目标策略的含义：
 
-- `allowlist`：始终允许回环 Origin，并允许 `PRESET_STUDIO_ST_ALLOWED_ORIGINS` 中逐项精确匹配的 Origin。这是默认值。
+- `allowlist`：始终允许回环 Origin，并允许 `PRESET_STUDIO_ST_ALLOWED_ORIGINS` 中逐项精确匹配的 Origin。
 - `private`：允许回环、IPv4 RFC1918 和 IPv6 ULA 目标，适合容器连接可信 LAN 中的 ST。
-- `any`：允许任意 HTTP(S) Origin。必须显式配置，只能在完全可信的网络中使用。
+- `any`：允许任意 HTTP(S) Origin。这是默认值，只能在完全可信的网络中使用。
 
 目标只接受规范化的 HTTP(S) Origin，不把路径、查询、片段或 URL 用户信息作为连接目标。`169.254/16`、`fe80::/10` 等 link-local、unspecified、multicast/reserved 和云 metadata 地址在所有策略（包括显式 allowlist 和 `any`）下始终拒绝。每次 ST 请求都重新解析 DNS、校验所有结果并把本次连接固定到已校验地址；任何重定向都拒绝。请求同时受连接超时、总超时和响应体大小限制。`private`/`any` 会扩大服务端请求能力；Preset Studio 自身又没有用户鉴权，因此不得直接暴露公网。
 
@@ -252,14 +252,16 @@ ST 直连的主要错误类别：
 
 ## 工程格式
 
-导入器生成 `project.json`、`preset.base.json`、`prompts/`、`regex/`、`scripts/`、`snapshots/`、`recovery/` 和 `output/`。
+导入器生成 `project.json`、`preset.settings.json`、`preset.prompt-fields.json`、`extensions/`、`prompts/`、`regex/`、`scripts/`、`snapshots/`、`recovery/` 和 `output/`。
 
 - Prompt 元数据和正文分别保存为 `meta.json`、`content.md`。
 - Regex 元数据、查找式和替换 HTML 分别保存为 `meta.json`、`find.txt`、`replace.html`。
 - Tavern Helper 脚本元数据和源码分别保存为 `meta.json`、`content.js`。
-- `preset.base.json` 保留未由专用编辑器管理的所有已知/未知字段。
+- `preset.settings.json` 保存请求参数、基本配置以及未由专用编辑器管理的顶层字段，不包含 `extensions`。
+- `preset.prompt-fields.json` 保存 `impersonation_prompt`、`new_chat_prompt`、`wi_format` 等顶层提示词与标签字段。
+- `extensions/ext-<base64url(extension-key)>.json` 每个文件直接对应完整预设中的一个 `extensions[extensionKey]`。
 - 示例中的三个一致 Regex 镜像被识别为一个逻辑集合，构建时写回三个目标。
-- 冲突的 Regex 镜像不会静默合并，而会完整保留在 `preset.base.json`。
+- 冲突的 Regex 镜像不会静默合并，而会完整保留在对应的扩展配置文件中。
 - `snapshots/index.json` 记录手动和自动快照；自动快照最多保留最近 20 个，手动快照不自动清理。
 
 结构 mutation 只接受一次单操作，并在工程锁内复制受管源码到 `.staging`、执行变更、完整构建验证、按需创建快照，最后通过带回滚的目录交换提交。名称不参与物理路径拼接；属性表单只 patch 白名单字段，未知 `meta.json` 字段保持不变。

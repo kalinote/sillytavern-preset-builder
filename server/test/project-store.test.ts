@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ApiError } from "../src/errors.js";
+import { extensionConfigPath } from "../src/extension-config.js";
 import { ProjectStore } from "../src/project-store.js";
 import type { JsonObject, JsonValue } from "../src/types.js";
 
@@ -28,6 +29,10 @@ function fixturePreset(): JsonObject {
   return {
     temperature: 0,
     send_if_empty: "",
+    impersonation_prompt: "Write as {{user}}",
+    new_chat_prompt: "Start a new chat",
+    wi_format: "<world>{0}</world>",
+    scenario_format: "<scenario>{{scenario}}</scenario>",
     nullable_unknown: null,
     empty_unknown: [],
     unknown_top_level: { keep: true, nested: { value: 7 } },
@@ -125,12 +130,30 @@ test("import splits and rebuilds a preset with deep semantic equality", async ()
     assert.deepEqual(built.preset, preset);
     assert.equal(built.diagnostics.length, 0);
 
-    const base = JSON.parse(await readFile(join(root, manifest.id, "preset.base.json"), "utf8")) as JsonObject;
-    assert.deepEqual(base.unknown_top_level, preset.unknown_top_level);
-    assert.deepEqual((base.extensions as JsonObject).unknown_extension, (preset.extensions as JsonObject).unknown_extension);
-    assert.deepEqual((base.extensions as JsonObject).regex_scripts, []);
+    const settings = JSON.parse(await readFile(join(root, manifest.id, "preset.settings.json"), "utf8")) as JsonObject;
+    const promptFields = JSON.parse(await readFile(join(root, manifest.id, "preset.prompt-fields.json"), "utf8")) as JsonObject;
+    const unknownExtension = JSON.parse(await readFile(
+      join(root, manifest.id, extensionConfigPath("unknown_extension")),
+      "utf8",
+    )) as JsonObject;
+    const regexExtension = JSON.parse(await readFile(
+      join(root, manifest.id, extensionConfigPath("regex_scripts")),
+      "utf8",
+    )) as JsonValue;
+    assert.deepEqual(settings.unknown_top_level, preset.unknown_top_level);
+    assert.equal(settings.extensions, undefined);
+    assert.equal(settings.impersonation_prompt, undefined);
+    assert.equal(promptFields.impersonation_prompt, preset.impersonation_prompt);
+    assert.deepEqual(unknownExtension, (preset.extensions as JsonObject).unknown_extension);
+    assert.deepEqual(regexExtension, []);
 
     const files = await store.listFiles(manifest.id);
+    assert(files.some((entry) => entry.path === "preset.settings.json"));
+    assert(files.some((entry) => entry.path === "preset.prompt-fields.json"));
+    assert(files.some((entry) => entry.path === extensionConfigPath("SPreset")));
+    assert(files.some((entry) => entry.path === extensionConfigPath("unknown_extension")));
+    assert.equal(files.some((entry) => entry.path === "preset.base.json"), false);
+    assert.equal(files.some((entry) => entry.path === "preset.extensions.json"), false);
     assert(files.some((entry) => entry.path.endsWith("/content.md")));
     assert(files.some((entry) => entry.path.endsWith("/replace.html")));
     assert(files.some((entry) => entry.path.endsWith("/content.js")));
@@ -157,11 +180,17 @@ test("conflicting Regex mirrors split the primary source and only write edits ba
     assert.equal(runtime.regexScripts.length, 1);
     assert.equal(runtime.scripts.length, 1);
 
-    const base = JSON.parse(await readFile(join(root, manifest.id, "preset.base.json"), "utf8")) as JsonObject;
-    const baseExtensions = base.extensions as JsonObject;
-    assert.deepEqual(baseExtensions.regex_scripts, []);
+    const regexExtension = JSON.parse(await readFile(
+      join(root, manifest.id, extensionConfigPath("regex_scripts")),
+      "utf8",
+    )) as JsonValue;
+    const spresetExtension = JSON.parse(await readFile(
+      join(root, manifest.id, extensionConfigPath("SPreset")),
+      "utf8",
+    )) as JsonObject;
+    assert.deepEqual(regexExtension, []);
     assert.equal(
-      ((((baseExtensions.SPreset as JsonObject).RegexBinding as JsonObject).regexes as JsonObject[])[0]?.replaceString),
+      (((spresetExtension.RegexBinding as JsonObject).regexes as JsonObject[])[0]?.replaceString),
       "<aside class=\"legacy-card\">$1</aside>",
     );
 
@@ -304,6 +333,52 @@ test("single-file saves are atomic, revision-aware, and affect the next build", 
     const built = await store.buildProject(manifest.id);
     const prompts = built.preset.prompts as JsonObject[];
     assert.equal(prompts.find((prompt) => prompt.identifier === "main")?.content, "Edited prompt");
+  });
+});
+
+test("preset configuration files directly separate settings, prompt fields, and extensions", async () => {
+  await withStore(async (store) => {
+    const preset = fixturePreset();
+    const manifest = await store.importProject({ name: "Config projections", preset });
+    const files = await store.listFiles(manifest.id);
+    assert(files.some((file) => file.path === "preset.settings.json"));
+    assert(files.some((file) => file.path === "preset.prompt-fields.json"));
+
+    const settingsFile = await store.readProjectFile(manifest.id, "preset.settings.json");
+    const settings = JSON.parse(settingsFile.content) as JsonObject;
+    assert.equal(settings.temperature, 0);
+    assert.deepEqual(settings.unknown_top_level, preset.unknown_top_level);
+    assert.equal(settings.extensions, undefined);
+    assert.equal(settings.impersonation_prompt, undefined);
+    assert.equal(settings.wi_format, undefined);
+
+    const promptFile = await store.readProjectFile(manifest.id, "preset.prompt-fields.json");
+    const promptFields = JSON.parse(promptFile.content) as JsonObject;
+    assert.equal(promptFields.impersonation_prompt, preset.impersonation_prompt);
+    assert.equal(promptFields.wi_format, preset.wi_format);
+    assert.equal(promptFields.extensions, undefined);
+    assert.equal(promptFields.temperature, undefined);
+
+    settings.temperature = 0.75;
+    settings.another_basic_field = { keep: "yes" };
+    await store.saveProjectFile(manifest.id, "preset.settings.json", {
+      content: JSON.stringify(settings),
+      ifRevision: settingsFile.revision,
+    });
+    const editedPromptFields = JSON.parse(promptFile.content) as JsonObject;
+    editedPromptFields.new_chat_prompt = "Edited new chat prompt";
+    delete editedPromptFields.scenario_format;
+    await store.saveProjectFile(manifest.id, "preset.prompt-fields.json", {
+      content: JSON.stringify(editedPromptFields),
+      ifRevision: promptFile.revision,
+    });
+
+    const built = await store.buildProject(manifest.id);
+    assert.equal(built.preset.temperature, 0.75);
+    assert.deepEqual(built.preset.another_basic_field, { keep: "yes" });
+    assert.equal(built.preset.new_chat_prompt, "Edited new chat prompt");
+    assert.equal(built.preset.scenario_format, undefined);
+    assert.deepEqual(built.preset.extensions, preset.extensions);
   });
 });
 
@@ -505,10 +580,10 @@ test("schema v2 structure mutations preserve unknown fields and enforce prompt r
       extensionKey: plugin.extensionKey,
       known: plugin.known,
     })), [
-      { id: "extension:unknown_extension", extensionKey: "unknown_extension", known: false },
       { id: "regex", extensionKey: "regex_scripts", known: true },
       { id: "spreset", extensionKey: "SPreset", known: true },
       { id: "tavern-helper", extensionKey: "tavern_helper", known: true },
+      { id: "extension:unknown_extension", extensionKey: "unknown_extension", known: false },
     ]);
 
     const duplicated = await store.mutateProjectStructure(manifest.id, {

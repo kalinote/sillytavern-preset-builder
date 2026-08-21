@@ -159,7 +159,7 @@ export interface ProjectPluginSummary {
   displayName: string;
   extensionKey: string;
   known: boolean;
-  configSourcePath: "preset.base.json";
+  configSourcePath: string;
 }
 
 export interface ProjectStructure {
@@ -866,13 +866,14 @@ function parseProjectStructure(value: unknown): ProjectStructure {
           || typeof plugin.id !== "string"
           || typeof plugin.displayName !== "string"
           || typeof plugin.extensionKey !== "string"
+          || typeof plugin.configSourcePath !== "string"
         ) return [];
         return [{
           id: plugin.id,
           displayName: plugin.displayName,
           extensionKey: plugin.extensionKey,
           known: plugin.known === true,
-          configSourcePath: "preset.base.json",
+          configSourcePath: plugin.configSourcePath,
         }];
       })
       : [],

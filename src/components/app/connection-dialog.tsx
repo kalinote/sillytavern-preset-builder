@@ -386,8 +386,8 @@ function SessionCard({ session }: { session: StSession }) {
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
         <SessionFact label="ST 用户" value={session.userHandle ?? "未报告 / 无需登录"} />
-        <SessionFact label="兼容性" value={session.compatibility ?? "尚未报告"} />
-        <SessionFact label="连接目标策略" value={session.targetPolicy ?? "服务器默认"} />
+        <SessionFact label="兼容性" value={compatibilityLabel(session.compatibility)} />
+        <SessionFact label="连接目标策略" value={targetPolicyLabel(session.targetPolicy)} />
         <SessionFact label="最近检查" value={formatDate(session.lastCheckedAt)} />
       </div>
     </div>
@@ -459,6 +459,16 @@ function sessionStatusLabel(status: StSession["status"]) {
   if (status === "unreachable") return "SillyTavern 暂时不可达";
   if (status === "expired") return "登录会话已过期";
   return "当前 SillyTavern 版本不受支持";
+}
+
+function compatibilityLabel(compatibility: StSession["compatibility"]) {
+  return compatibility === "supported" ? "已验证兼容" : "尚未验证兼容";
+}
+
+function targetPolicyLabel(policy: StSession["targetPolicy"]) {
+  if (policy === "allowlist") return "仅回环与白名单";
+  if (policy === "private") return "仅私有网络";
+  return "任意 HTTP(S) 目标";
 }
 
 function formatDate(value: string | null) {

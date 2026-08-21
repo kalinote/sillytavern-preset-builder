@@ -481,7 +481,6 @@ function FileRow({
     >
       <Icon className={cn("size-3.5 shrink-0", active && "text-primary")} />
       <span className="min-w-0 flex-1 truncate text-xs font-medium">{label}</span>
-      {file.kind === "reference" ? <Badge variant="blue">共享</Badge> : null}
       {file.role === "source-json" ? <Badge variant="blue">完整</Badge> : null}
       {file.size > 1_000_000 ? <Badge variant="amber">大文件</Badge> : null}
     </button>

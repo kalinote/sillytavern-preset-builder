@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { SillyTavern118Adapter } from "../src/st-1-18-adapter.js";
 import { createApiServer } from "../src/http.js";
-import { StHttpClient } from "../src/st-http-client.js";
+import { parseStTargetPolicy, StHttpClient } from "../src/st-http-client.js";
 import type { JsonObject } from "../src/types.js";
 
 interface MockStOptions {
@@ -477,6 +477,7 @@ test("ST 1.18 adapter supports no-auth, Basic-only, account-only, and combined a
 });
 
 test("target policy rejects non-origin URLs and non-allowlisted private targets before connecting", async () => {
+  assert.equal(parseStTargetPolicy(undefined), "any");
   assert.throws(
     () => new StHttpClient({
       origin: "http://127.0.0.1:8000/not-an-origin",
@@ -498,6 +499,9 @@ test("target policy rejects non-origin URLs and non-allowlisted private targets 
   });
   await assert.rejects(
     client.request("/csrf-token"),
-    (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "ST_TARGET_NOT_ALLOWED",
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "ST_TARGET_NOT_ALLOWED"
+      && error.message === "当前连接目标不符合服务端配置的 SillyTavern 目标策略。",
   );
 });

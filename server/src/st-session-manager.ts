@@ -117,7 +117,7 @@ function publicSession(record: StSessionRecord, targetPolicy: StTargetPolicy): S
 
 function validatePresetName(value: unknown, field = "presetName"): string {
   if (typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > 255 || value.trim() !== value) {
-    throw new ApiError(400, "INVALID_INPUT", `${field} must be a non-empty UTF-8 string of at most 255 bytes`);
+    throw new ApiError(400, "INVALID_INPUT", `${field} 必须是非空的 UTF-8 字符串，且不能超过 255 字节。`);
   }
   if (
     /[\u0000-\u001f<>:"/\\|?*]/.test(value) ||
@@ -126,7 +126,7 @@ function validatePresetName(value: unknown, field = "presetName"): string {
     value === ".." ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value)
   ) {
-    throw new ApiError(400, "ST_PRESET_NAME_INVALID", `${field} contains characters SillyTavern cannot preserve safely`);
+    throw new ApiError(400, "ST_PRESET_NAME_INVALID", `${field} 包含 SillyTavern 无法安全保存的字符。`);
   }
   return value;
 }
@@ -188,7 +188,7 @@ export class StSessionManager {
   async createSession(input: CreateStSessionInput): Promise<{ token: string; session: StSessionInfo }> {
     this.cleanup();
     if (this.sessions.size + this.pendingSessions >= this.options.maxSessions) {
-      throw new ApiError(429, "ST_SESSION_LIMIT", "Too many SillyTavern sessions are active");
+      throw new ApiError(429, "ST_SESSION_LIMIT", "当前活动的 SillyTavern 会话过多，请稍后重试。");
     }
     this.pendingSessions += 1;
     let client!: StHttpClient;
@@ -253,7 +253,7 @@ export class StSessionManager {
       this.updateVersion(record, version);
       record.status = statusFromVersion(version);
     } catch (error) {
-      const apiError = error instanceof ApiError ? error : new ApiError(502, "ST_UNREACHABLE", "Unable to check SillyTavern");
+      const apiError = error instanceof ApiError ? error : new ApiError(502, "ST_UNREACHABLE", "无法检查 SillyTavern 连接状态。");
       if (isExpiredError(apiError) || apiError.code === "ST_REDIRECT_REJECTED") this.expireRecord(record);
       else if (isUnreachableError(apiError)) record.status = "unreachable";
       else throw apiError;
@@ -320,12 +320,12 @@ export class StSessionManager {
   ): Promise<PushPreviewResult> {
     this.cleanup();
     if (this.previews.size + this.pendingPreviews >= this.options.maxPreviews) {
-      throw new ApiError(429, "ST_PREVIEW_LIMIT", "Too many push previews are active");
+      throw new ApiError(429, "ST_PREVIEW_LIMIT", "当前活动的推送预览过多，请稍后重试。");
     }
     const record = this.requireUsableRecord(token);
     const targetName = validatePresetName(input.targetName, "targetName");
     if (input.mode !== "create" && input.mode !== "overwrite") {
-      throw new ApiError(400, "INVALID_INPUT", "mode must be create or overwrite");
+      throw new ApiError(400, "INVALID_INPUT", "mode 必须是 create 或 overwrite。");
     }
     const mode = input.mode;
     this.pendingPreviews += 1;
@@ -342,13 +342,13 @@ export class StSessionManager {
     const { manifest, build: built } = snapshot;
     const target = catalog.presets.find((preset) => preset.name === targetName);
     if (mode === "create" && target) {
-      throw new ApiError(409, "ST_PRESET_TARGET_EXISTS", "Target preset already exists; choose overwrite mode", {
+      throw new ApiError(409, "ST_PRESET_TARGET_EXISTS", "目标预设已经存在，请选择覆盖模式。", {
         name: targetName,
         revision: target.revision,
       });
     }
     if (mode === "overwrite" && !target) {
-      throw new ApiError(404, "ST_PRESET_NOT_FOUND", "Target preset does not exist; choose create mode", { name: targetName });
+      throw new ApiError(404, "ST_PRESET_NOT_FOUND", "目标预设不存在，请选择新建模式。", { name: targetName });
     }
     const buildRevision = canonicalPresetRevision(built.preset);
     const change = !target ? "created" : target.revision === buildRevision ? "unchanged" : "changed";
@@ -400,33 +400,33 @@ export class StSessionManager {
     stUrl: string;
   }> {
     if (typeof previewTokenValue !== "string" || previewTokenValue.length < 32 || previewTokenValue.length > 128) {
-      throw new ApiError(400, "ST_PREVIEW_INVALID", "previewToken is invalid");
+      throw new ApiError(400, "ST_PREVIEW_INVALID", "推送预览令牌无效。");
     }
     const previewHash = hash(previewTokenValue);
     const preview = this.previews.get(previewHash);
-    if (!preview) throw new ApiError(404, "ST_PREVIEW_INVALID", "Push preview does not exist or was already consumed");
+    if (!preview) throw new ApiError(404, "ST_PREVIEW_INVALID", "推送预览不存在，或已经被使用。");
     this.previews.delete(previewHash); // Every commit attempt consumes the token.
     if (preview.expiresAt <= this.options.now()) {
-      throw new ApiError(410, "ST_PREVIEW_EXPIRED", "Push preview has expired");
+      throw new ApiError(410, "ST_PREVIEW_EXPIRED", "推送预览已经过期。");
     }
     const record = this.requireUsableRecord(token);
     if (record.key !== preview.sessionKey) {
-      throw new ApiError(404, "ST_PREVIEW_INVALID", "Push preview does not belong to this session");
+      throw new ApiError(404, "ST_PREVIEW_INVALID", "推送预览不属于当前 SillyTavern 会话。");
     }
     if (preview.projectId !== projectId) {
-      throw new ApiError(404, "ST_PREVIEW_INVALID", "Push preview does not belong to this project route");
+      throw new ApiError(404, "ST_PREVIEW_INVALID", "推送预览不属于当前工程。");
     }
     if (!preview.canCommit) {
-      throw new ApiError(409, "ST_PREVIEW_NOT_COMMITTABLE", "Push preview contains blocking build diagnostics");
+      throw new ApiError(409, "ST_PREVIEW_NOT_COMMITTABLE", "推送预览包含阻止提交的构建问题。");
     }
     return this.withTargetCommitLock(`${record.origin}\0${preview.targetName}`, async () => {
       if (!this.sessions.has(record.key)) {
-        throw new ApiError(401, "ST_SESSION_REQUIRED", "SillyTavern session ended before push commit");
+        throw new ApiError(401, "ST_SESSION_REQUIRED", "提交推送前，SillyTavern 会话已经结束。");
       }
       return this.store.withProjectBuildTransaction(projectId, async ({ manifest, build: built }) => {
         const actualBuildRevision = canonicalPresetRevision(built.preset);
         if (manifest.updatedAt !== preview.projectRevision || actualBuildRevision !== preview.buildRevision) {
-          throw new ApiError(409, "PROJECT_CHANGED", "Project changed after the push preview", {
+          throw new ApiError(409, "PROJECT_CHANGED", "创建推送预览后，工程内容已经发生变化。", {
             expectedProjectRevision: preview.projectRevision,
             actualProjectRevision: manifest.updatedAt,
             expectedBuildRevision: preview.buildRevision,
@@ -439,7 +439,7 @@ export class StSessionManager {
           ? currentTarget !== undefined
           : currentTarget === undefined || currentTarget.revision !== preview.targetRevision;
         if (targetConflict) {
-          throw new ApiError(409, "ST_PRESET_CHANGED", "Target preset changed after the push preview", {
+          throw new ApiError(409, "ST_PRESET_CHANGED", "创建推送预览后，目标预设已经发生变化。", {
             expectedRevision: preview.targetRevision ?? null,
             actualRevision: currentTarget?.revision ?? null,
           });
@@ -452,7 +452,7 @@ export class StSessionManager {
           await this.runRemote(record, () => record.adapter.savePreset(preview.targetName, built.preset));
           const verified = await this.runRemote(record, () => record.adapter.readPreset(preview.targetName));
           if (verified.revision !== actualBuildRevision) {
-            throw new ApiError(502, "ST_PRESET_VERIFY_FAILED", "SillyTavern saved preset could not be verified", {
+            throw new ApiError(502, "ST_PRESET_VERIFY_FAILED", "无法验证 SillyTavern 保存后的预设。", {
               expectedRevision: actualBuildRevision,
               actualRevision: verified.revision,
             });
@@ -493,20 +493,20 @@ export class StSessionManager {
 
   private requireRecord(token: string | undefined): StSessionRecord {
     const record = this.getRecord(token, true);
-    if (!record) throw new ApiError(401, "ST_SESSION_REQUIRED", "A connected SillyTavern session is required");
+    if (!record) throw new ApiError(401, "ST_SESSION_REQUIRED", "请先连接 SillyTavern。");
     return record;
   }
 
   private requireUsableRecord(token: string | undefined): StSessionRecord {
     const record = this.requireRecord(token);
     if (record.status === "unsupported") {
-      throw new ApiError(409, "ST_VERSION_UNSUPPORTED", "SillyTavern 1.18.0 or newer is required");
+      throw new ApiError(409, "ST_VERSION_UNSUPPORTED", "需要 SillyTavern 1.18.0 或更高版本。");
     }
     if (record.status === "expired") {
-      throw new ApiError(401, "ST_SESSION_EXPIRED", "SillyTavern authentication has expired; reconnect to continue");
+      throw new ApiError(401, "ST_SESSION_EXPIRED", "SillyTavern 认证已经过期，请重新连接。");
     }
     if (record.status === "unreachable") {
-      throw new ApiError(502, "ST_UNREACHABLE", "SillyTavern is currently unreachable; check the session to retry");
+      throw new ApiError(502, "ST_UNREACHABLE", "当前无法访问 SillyTavern，请检查连接后重试。");
     }
     return record;
   }

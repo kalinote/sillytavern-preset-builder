@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
 import { buildPresetProject } from "./builder.js";
 import { ApiError } from "./errors.js";
+import { EXTENSIONS_DIRECTORY, extensionConfigPath } from "./extension-config.js";
 import { cloneJson, isJsonObject, stableSha256, stringifyJson } from "./json.js";
 import type {
   BuildResult,
@@ -43,7 +44,7 @@ function pluginSummary(extensionKey: string) {
     displayName: known?.displayName ?? extensionKey,
     extensionKey,
     known: known !== undefined,
-    configSourcePath: "preset.base.json" as const,
+    configSourcePath: extensionConfigPath(extensionKey),
   };
 }
 
@@ -65,6 +66,21 @@ async function readJson<T>(path: string, label: string): Promise<T> {
     throw new ApiError(422, "INVALID_PROJECT_JSON", `${label} is not valid JSON`, { path });
   }
   return value as T;
+}
+
+async function readOptionalJson(path: string, label: string): Promise<JsonValue | undefined> {
+  let source: string;
+  try {
+    source = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    return JSON.parse(source) as JsonValue;
+  } catch {
+    throw new ApiError(422, "INVALID_PROJECT_JSON", `${label} is not valid JSON`, { path });
+  }
 }
 
 async function writeJson(path: string, value: JsonValue): Promise<void> {
@@ -270,14 +286,10 @@ function validatePatch(kind: ProjectItemKind, patch: JsonObject): void {
 
 async function ensureManagedKind(projectRoot: string, manifest: ProjectManifest, kind: ProjectItemKind): Promise<void> {
   if (kind === "prompt" || (kind === "regex" ? manifest.managedPaths.regex : manifest.managedPaths.scripts)) return;
-  const basePath = join(projectRoot, "preset.base.json");
-  const base = await readJson<JsonObject>(basePath, "preset.base.json");
-  if (!isJsonObject(base)) throw new ApiError(422, "INVALID_PROJECT_JSON", "preset.base.json must be an object");
-  if (!isJsonObject(base.extensions)) base.extensions = {};
-  const extensions = base.extensions as JsonObject;
+  await mkdir(join(projectRoot, EXTENSIONS_DIRECTORY), { recursive: true });
 
   if (kind === "regex") {
-    extensions.regex_scripts = [];
+    await writeJson(join(projectRoot, extensionConfigPath("regex_scripts")), []);
     manifest.managedPaths.regex = true;
     manifest.regexMirrorBinding = {
       authority: "extensions.regex_scripts",
@@ -285,14 +297,19 @@ async function ensureManagedKind(projectRoot: string, manifest: ProjectManifest,
       consistent: true,
     };
   } else {
-    if (!isJsonObject(extensions.tavern_helper)) extensions.tavern_helper = {};
-    (extensions.tavern_helper as JsonObject).scripts = [];
+    const helperPath = join(projectRoot, extensionConfigPath("tavern_helper"));
+    const currentHelper = await readOptionalJson(helperPath, "tavern_helper extension config");
+    if (currentHelper !== undefined && !isJsonObject(currentHelper)) {
+      throw new ApiError(422, "INVALID_PROJECT_JSON", "tavern_helper extension config must be an object");
+    }
+    const helper = currentHelper ?? {};
+    helper.scripts = [];
+    await writeJson(helperPath, helper);
     manifest.managedPaths.scripts = true;
   }
   const config = KIND_CONFIG[kind];
   await mkdir(join(projectRoot, config.root), { recursive: true });
   await writeJson(join(projectRoot, config.index), { schemaVersion: 1, items: [] });
-  await writeJson(basePath, base);
 }
 
 async function identifiersFor(projectRoot: string, kind: ProjectItemKind, index: OrderedIndex<AnyIndexItem>): Promise<string[]> {

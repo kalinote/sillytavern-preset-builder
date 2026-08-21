@@ -52,15 +52,15 @@ export function presetSize(preset: JsonObject): number {
 
 function responseError(response: StHttpResponse, operation: string): ApiError {
   if (response.status === 401) {
-    return new ApiError(401, "ST_SESSION_EXPIRED", "SillyTavern authentication is required or has expired");
+    return new ApiError(401, "ST_SESSION_EXPIRED", "SillyTavern 需要认证，或当前认证已经过期。");
   }
   if (response.status === 403) {
-    return new ApiError(403, "ST_CSRF_FAILED", "SillyTavern rejected the request or CSRF token");
+    return new ApiError(403, "ST_CSRF_FAILED", "SillyTavern 拒绝了请求或 CSRF 令牌。");
   }
   if (response.status === 404) {
-    return new ApiError(502, "ST_ENDPOINT_UNAVAILABLE", `SillyTavern does not provide the required ${operation} endpoint`);
+    return new ApiError(502, "ST_ENDPOINT_UNAVAILABLE", `SillyTavern 缺少“${operation}”所需的接口。`);
   }
-  return new ApiError(502, "ST_REMOTE_ERROR", `SillyTavern ${operation} request failed`, {
+  return new ApiError(502, "ST_REMOTE_ERROR", `SillyTavern 的“${operation}”请求失败。`, {
     status: response.status,
   });
 }
@@ -71,7 +71,7 @@ function requireSuccess(response: StHttpResponse, operation: string, allowed: re
 
 function parseVersionNumber(value: string): { major: number; minor: number; patch: number } {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
-  if (!match) throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern returned an invalid version");
+  if (!match) throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回了无效的版本号。");
   return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
 }
 
@@ -93,13 +93,13 @@ function parsePreset(value: unknown, name: string): StPresetSnapshot {
     try {
       preset = JSON.parse(value) as unknown;
     } catch {
-      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern returned malformed preset JSON", { name });
+      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的预设 JSON 格式错误。", { name });
     }
   } else {
     raw = JSON.stringify(value);
   }
   if (!isJsonObject(preset)) {
-    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern returned a non-object preset", { name });
+    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的预设不是 JSON 对象。", { name });
   }
   return {
     name,
@@ -126,8 +126,8 @@ function selectedPresetName(settingsValue: unknown): string | undefined {
 }
 
 function parseSettings(response: StHttpResponse): ParsedSettingsResponse {
-  requireSuccess(response, "settings");
-  if (!isJsonObject(response.json)) throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern settings response is invalid");
+  requireSuccess(response, "读取设置");
+  if (!isJsonObject(response.json)) throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的设置数据无效。");
   const names = response.json.openai_setting_names;
   const values = response.json.openai_settings;
   if (
@@ -136,12 +136,12 @@ function parseSettings(response: StHttpResponse): ParsedSettingsResponse {
     names.length !== values.length ||
     names.length > 10_000
   ) {
-    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern preset catalog is invalid");
+    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的预设目录无效。");
   }
   const seen = new Set<string>();
   const presets = names.map((name, index) => {
     if (typeof name !== "string" || !name || Buffer.byteLength(name, "utf8") > 255 || seen.has(name)) {
-      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern preset catalog contains an invalid name");
+      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的预设目录包含无效名称。");
     }
     seen.add(name);
     return parsePreset(values[index], name);
@@ -172,17 +172,17 @@ export class SillyTavern118Adapter {
         csrfToken: this.requireCsrfToken(),
       });
       if (response.status === 401) {
-        throw new ApiError(401, "ST_BASIC_AUTH_FAILED", "SillyTavern HTTP Basic authentication failed");
+        throw new ApiError(401, "ST_BASIC_AUTH_FAILED", "SillyTavern HTTP Basic 认证失败。");
       }
       if (response.status === 403) {
-        throw new ApiError(401, "ST_ACCOUNT_AUTH_FAILED", "SillyTavern account authentication failed");
+        throw new ApiError(401, "ST_ACCOUNT_AUTH_FAILED", "SillyTavern 账号认证失败。");
       }
       if (response.status === 429) {
-        throw new ApiError(429, "ST_RATE_LIMITED", "SillyTavern temporarily rate-limited account login");
+        throw new ApiError(429, "ST_RATE_LIMITED", "SillyTavern 暂时限制了账号登录请求，请稍后重试。");
       }
-      requireSuccess(response, "account login");
+      requireSuccess(response, "账号登录");
       if (!isJsonObject(response.json) || typeof response.json.handle !== "string" || !response.json.handle) {
-        throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern account login response is invalid");
+        throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的账号登录结果无效。");
       }
       userHandle = response.json.handle;
       await this.refreshCsrf();
@@ -196,7 +196,7 @@ export class SillyTavern118Adapter {
         throw new ApiError(
           401,
           accountAuth ? "ST_ACCOUNT_AUTH_FAILED" : "ST_ACCOUNT_AUTH_REQUIRED",
-          accountAuth ? "SillyTavern account authentication failed" : "SillyTavern account authentication is required",
+          accountAuth ? "SillyTavern 账号认证失败。" : "SillyTavern 要求进行账号认证。",
         );
       }
       throw error;
@@ -238,16 +238,16 @@ export class SillyTavern118Adapter {
     this.assertSupported();
     const parsed = parseSettings(await this.postProtected("/api/settings/get", {}));
     const preset = parsed.presets.find((item) => item.name === name);
-    if (!preset) throw new ApiError(404, "ST_PRESET_NOT_FOUND", "SillyTavern preset does not exist", { name });
+    if (!preset) throw new ApiError(404, "ST_PRESET_NOT_FOUND", "SillyTavern 中不存在该预设。", { name });
     return { ...preset, preset: structuredClone(preset.preset) };
   }
 
   async savePreset(name: string, preset: JsonObject): Promise<void> {
     this.assertSupported();
     const response = await this.postProtected("/api/presets/save", { apiId: "openai", name, preset });
-    requireSuccess(response, "preset save");
+    requireSuccess(response, "保存预设");
     if (!isJsonObject(response.json) || response.json.name !== name) {
-      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern preset save response changed the target name");
+      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 保存预设后返回了不同的目标名称。");
     }
   }
 
@@ -258,7 +258,7 @@ export class SillyTavern118Adapter {
 
   private assertSupported(): void {
     if (!this.currentVersion?.supported) {
-      throw new ApiError(409, "ST_VERSION_UNSUPPORTED", "SillyTavern 1.18.0 or newer is required");
+      throw new ApiError(409, "ST_VERSION_UNSUPPORTED", "需要 SillyTavern 1.18.0 或更高版本。");
     }
   }
 
@@ -269,26 +269,26 @@ export class SillyTavern118Adapter {
         401,
         this.client.usesBasicAuth ? "ST_BASIC_AUTH_FAILED" : "ST_BASIC_AUTH_REQUIRED",
         this.client.usesBasicAuth
-          ? "SillyTavern HTTP Basic authentication failed"
-          : "SillyTavern HTTP Basic authentication is required",
+          ? "SillyTavern HTTP Basic 认证失败。"
+          : "SillyTavern 要求进行 HTTP Basic 认证。",
       );
     }
     if (response.status === 429) {
-      throw new ApiError(429, "ST_RATE_LIMITED", "SillyTavern temporarily rate-limited authentication");
+      throw new ApiError(429, "ST_RATE_LIMITED", "SillyTavern 暂时限制了认证请求，请稍后重试。");
     }
-    requireSuccess(response, "CSRF token");
+    requireSuccess(response, "获取 CSRF 令牌");
     if (!isJsonObject(response.json) || typeof response.json.token !== "string" || !response.json.token) {
-      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern CSRF response is invalid");
+      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的 CSRF 数据无效。");
     }
     this.csrfToken = response.json.token;
   }
 
   private async readVersion(): Promise<StVersionInfo> {
     const response = await this.client.request("/version");
-    if (response.status === 401 || response.status === 403) throw responseError(response, "version");
-    requireSuccess(response, "version");
+    if (response.status === 401 || response.status === 403) throw responseError(response, "读取版本");
+    requireSuccess(response, "读取版本");
     if (!isJsonObject(response.json) || typeof response.json.pkgVersion !== "string") {
-      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern version response is invalid");
+      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的版本数据无效。");
     }
     const version = classifyVersion(response.json.pkgVersion);
     return {
@@ -301,7 +301,7 @@ export class SillyTavern118Adapter {
 
   private async ping(): Promise<void> {
     const response = await this.postProtected("/api/ping?extend=true", {});
-    requireSuccess(response, "ping", [200, 204]);
+    requireSuccess(response, "连接检查", [200, 204]);
   }
 
   private async postProtected(path: string, body: unknown): Promise<StHttpResponse> {
@@ -318,7 +318,7 @@ export class SillyTavern118Adapter {
   }
 
   private requireCsrfToken(): string {
-    if (!this.csrfToken) throw new ApiError(500, "ST_CSRF_STATE_INVALID", "SillyTavern CSRF state is unavailable");
+    if (!this.csrfToken) throw new ApiError(500, "ST_CSRF_STATE_INVALID", "SillyTavern CSRF 状态不可用。");
     return this.csrfToken;
   }
 }

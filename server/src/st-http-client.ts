@@ -64,7 +64,7 @@ export function normalizeStOrigin(input: string): string {
   try {
     parsed = new URL(input);
   } catch {
-    throw new ApiError(400, "ST_TARGET_INVALID", "SillyTavern origin must be a valid absolute URL");
+    throw new ApiError(400, "ST_TARGET_INVALID", "SillyTavern 地址必须是有效的绝对 URL。");
   }
   if (
     (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
@@ -77,16 +77,16 @@ export function normalizeStOrigin(input: string): string {
     throw new ApiError(
       400,
       "ST_TARGET_INVALID",
-      "SillyTavern origin must be an HTTP(S) origin without credentials, path, query, or fragment",
+      "SillyTavern 地址必须是 HTTP(S) Origin，且不能包含认证信息、路径、查询参数或片段。",
     );
   }
   return parsed.origin;
 }
 
 export function parseStTargetPolicy(value: string | undefined): StTargetPolicy {
-  const normalized = value?.trim().toLowerCase() || "allowlist";
+  const normalized = value?.trim().toLowerCase() || "any";
   if (normalized === "allowlist" || normalized === "private" || normalized === "any") return normalized;
-  throw new Error("PRESET_STUDIO_ST_TARGET_POLICY must be allowlist, private, or any");
+  throw new Error("PRESET_STUDIO_ST_TARGET_POLICY 必须是 allowlist、private 或 any。");
 }
 
 export function parseStAllowedOrigins(value: string | undefined): Set<string> {
@@ -132,7 +132,7 @@ async function resolveAndAuthorizeTarget(
           lookup(hostname, { all: true, verbatim: true }),
           new Promise<never>((_resolve, reject) => {
             timeout = setTimeout(() => {
-              reject(new ApiError(504, "ST_CONNECT_TIMEOUT", "Timed out resolving the SillyTavern host"));
+              reject(new ApiError(504, "ST_CONNECT_TIMEOUT", "解析 SillyTavern 主机地址超时。"));
             }, connectTimeoutMs);
             timeout.unref();
           }),
@@ -144,21 +144,21 @@ async function resolveAndAuthorizeTarget(
     }
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    throw new ApiError(502, "ST_DNS_FAILED", "Unable to resolve the SillyTavern host", {
+    throw new ApiError(502, "ST_DNS_FAILED", "无法解析 SillyTavern 主机地址。", {
       reason: error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code) : "DNS_ERROR",
     });
   }
   addresses = [...new Map(addresses.map((item) => [`${item.family}:${item.address}`, item])).values()];
-  if (addresses.length === 0) throw new ApiError(502, "ST_DNS_FAILED", "SillyTavern host resolved to no addresses");
+  if (addresses.length === 0) throw new ApiError(502, "ST_DNS_FAILED", "SillyTavern 主机没有解析出可用地址。");
   if (addresses.some(isForbiddenSpecial)) {
-    throw new ApiError(403, "ST_TARGET_NOT_ALLOWED", "SillyTavern target resolves to a forbidden special address");
+    throw new ApiError(403, "ST_TARGET_NOT_ALLOWED", "SillyTavern 目标解析到了禁止访问的特殊地址。");
   }
 
   const allowed = policy === "any"
     || (policy === "private" && addresses.every(isPrivate))
     || (policy === "allowlist" && (allowedOrigins.has(origin) || addresses.every(isLoopback)));
   if (!allowed) {
-    throw new ApiError(403, "ST_TARGET_NOT_ALLOWED", "SillyTavern target is not permitted by the configured policy", {
+    throw new ApiError(403, "ST_TARGET_NOT_ALLOWED", "当前连接目标不符合服务端配置的 SillyTavern 目标策略。", {
       policy,
     });
   }
@@ -221,7 +221,7 @@ function transportError(error: unknown): ApiError {
   return new ApiError(
     502,
     tlsCodes.has(code) ? "ST_TLS_ERROR" : "ST_UNREACHABLE",
-    tlsCodes.has(code) ? "SillyTavern TLS validation failed" : "Unable to reach SillyTavern",
+    tlsCodes.has(code) ? "SillyTavern TLS 证书校验失败。" : "无法连接 SillyTavern。",
     { reason: code },
   );
 }
@@ -266,11 +266,11 @@ export class StHttpClient {
     options: { method?: "GET" | "POST"; body?: unknown; csrfToken?: string } = {},
   ): Promise<StHttpResponse> {
     if (!path.startsWith("/") || path.startsWith("//")) {
-      throw new ApiError(500, "ST_CLIENT_PATH_INVALID", "Internal SillyTavern request path is invalid");
+      throw new ApiError(500, "ST_CLIENT_PATH_INVALID", "内部 SillyTavern 请求路径无效。");
     }
     const url = new URL(path, `${this.origin}/`);
     if (url.origin !== this.origin) {
-      throw new ApiError(500, "ST_CLIENT_PATH_INVALID", "Internal SillyTavern request escaped its configured origin");
+      throw new ApiError(500, "ST_CLIENT_PATH_INVALID", "内部 SillyTavern 请求超出了已配置的 Origin。");
     }
     const addresses = await resolveAndAuthorizeTarget(
       this.origin,
@@ -298,7 +298,7 @@ export class StHttpClient {
       let settled = false;
       let connectTimer: NodeJS.Timeout | undefined;
       const overallTimer = setTimeout(() => {
-        request.destroy(new ApiError(504, "ST_TIMEOUT", "SillyTavern request timed out"));
+        request.destroy(new ApiError(504, "ST_TIMEOUT", "SillyTavern 请求超时。"));
       }, this.options.requestTimeoutMs);
       overallTimer.unref();
       const finishReject = (error: unknown) => {
@@ -331,7 +331,7 @@ export class StHttpClient {
         const status = response.statusCode ?? 0;
         if (status >= 300 && status < 400) {
           response.resume();
-          finishReject(new ApiError(502, "ST_REDIRECT_REJECTED", "SillyTavern returned a redirect; redirects are disabled"));
+          finishReject(new ApiError(502, "ST_REDIRECT_REJECTED", "SillyTavern 返回了重定向，但连接器不允许重定向。"));
           return;
         }
         this.cookieJar.capture(response.headers["set-cookie"]);
@@ -341,7 +341,7 @@ export class StHttpClient {
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           total += buffer.byteLength;
           if (total > this.options.responseLimitBytes) {
-            response.destroy(new ApiError(502, "ST_RESPONSE_TOO_LARGE", "SillyTavern response exceeds the configured limit"));
+            response.destroy(new ApiError(502, "ST_RESPONSE_TOO_LARGE", "SillyTavern 响应超过了服务端配置的大小限制。"));
             return;
           }
           chunks.push(buffer);
@@ -358,7 +358,7 @@ export class StHttpClient {
       request.on("socket", (socket) => {
         if (!socket.connecting) return;
         connectTimer = setTimeout(() => {
-          request.destroy(new ApiError(504, "ST_CONNECT_TIMEOUT", "Timed out connecting to SillyTavern"));
+          request.destroy(new ApiError(504, "ST_CONNECT_TIMEOUT", "连接 SillyTavern 超时。"));
         }, this.options.connectTimeoutMs);
         connectTimer.unref();
         const connectedEvent = url.protocol === "https:" ? "secureConnect" : "connect";
@@ -377,7 +377,7 @@ export class StHttpClient {
     }
     throw lastError instanceof Error
       ? lastError
-      : new ApiError(502, "ST_UNREACHABLE", "Unable to reach SillyTavern");
+      : new ApiError(502, "ST_UNREACHABLE", "无法连接 SillyTavern。");
   }
 
   clearSensitiveState(): void {

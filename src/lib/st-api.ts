@@ -175,7 +175,7 @@ function requiredString(
   context: string,
 ) {
   const value = optionalString(record[key]);
-  if (!value) throw new TypeError(`${context}.${key} must be a non-empty string`);
+  if (!value) throw new TypeError(`响应字段 ${context}.${key} 必须是非空字符串。`);
   return value;
 }
 
@@ -186,14 +186,14 @@ function unwrap(value: unknown, key: string): unknown {
 function parseSession(value: unknown): StSession | null {
   const candidate = unwrap(value, "session");
   if (candidate === undefined || candidate === null) return null;
-  if (!isRecord(candidate)) throw new TypeError("ST session response must be an object");
+  if (!isRecord(candidate)) throw new TypeError("SillyTavern 会话响应必须是对象。");
 
   const nestedSt = isRecord(candidate.st) ? candidate.st : null;
   const origin =
     optionalString(candidate.origin) ??
     optionalString(candidate.baseUrl) ??
     optionalString(nestedSt?.url);
-  if (!origin) throw new TypeError("ST session response must include origin");
+  if (!origin) throw new TypeError("SillyTavern 会话响应缺少 Origin。");
 
   const wireStatus = optionalString(candidate.status);
   if (
@@ -202,7 +202,7 @@ function parseSession(value: unknown): StSession | null {
     wireStatus !== "expired" &&
     wireStatus !== "unsupported"
   ) {
-    throw new TypeError("ST session status is invalid");
+    throw new TypeError("SillyTavern 会话状态无效。");
   }
   const capabilities = Array.isArray(candidate.capabilities)
     ? candidate.capabilities.filter(
@@ -213,15 +213,15 @@ function parseSession(value: unknown): StSession | null {
     !Array.isArray(candidate.authModes) ||
     candidate.authModes.some((mode) => mode !== "basic" && mode !== "account")
   ) {
-    throw new TypeError("ST session authModes are invalid");
+    throw new TypeError("SillyTavern 会话认证模式无效。");
   }
   const compatibility = candidate.compatibility;
   if (compatibility !== "supported" && compatibility !== "untested") {
-    throw new TypeError("ST session compatibility is invalid");
+    throw new TypeError("SillyTavern 会话兼容性状态无效。");
   }
   const targetPolicy = candidate.targetPolicy;
   if (targetPolicy !== "allowlist" && targetPolicy !== "private" && targetPolicy !== "any") {
-    throw new TypeError("ST session targetPolicy is invalid");
+    throw new TypeError("SillyTavern 会话目标策略无效。");
   }
 
   return {
@@ -243,10 +243,10 @@ function parseSession(value: unknown): StSession | null {
 }
 
 function parsePresetSummary(value: unknown): StPresetSummary {
-  if (!isRecord(value)) throw new TypeError("ST preset entry must be an object");
+  if (!isRecord(value)) throw new TypeError("SillyTavern 预设条目必须是对象。");
   const size = value.size;
   if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
-    throw new TypeError("preset.size must be a non-negative number");
+    throw new TypeError("预设大小必须是非负数。");
   }
   return {
     name: requiredString(value, "name", "preset"),
@@ -258,7 +258,7 @@ function parsePresetSummary(value: unknown): StPresetSummary {
 function parsePresetCatalog(value: unknown): StPresetCatalog {
   const candidate = unwrap(value, "catalog");
   if (!isRecord(candidate) || !Array.isArray(candidate.presets)) {
-    throw new TypeError("Preset catalog response must include presets");
+    throw new TypeError("预设目录响应缺少预设列表。");
   }
   return {
     presets: candidate.presets.map(parsePresetSummary),
@@ -277,18 +277,18 @@ function parsePresetDocument(value: unknown): StPresetDocument {
   if (isRecord(value) && isRecord(value.result)) {
     return parsePresetDocument(value.result);
   }
-  throw new TypeError("ST preset response must contain a name and preset object");
+  throw new TypeError("SillyTavern 预设响应必须包含名称和预设对象。");
 }
 
 function parsePushPreview(value: unknown): StPushPreview {
   const candidate = unwrap(value, "preview");
-  if (!isRecord(candidate)) throw new TypeError("Push preview response must be an object");
+  if (!isRecord(candidate)) throw new TypeError("推送预览响应必须是对象。");
   if (!isRecord(candidate.target) || !isRecord(candidate.build)) {
-    throw new TypeError("Push preview must include target and build objects");
+    throw new TypeError("推送预览必须包含目标信息和构建信息。");
   }
   const change = candidate.change;
   if (change !== "created" && change !== "changed" && change !== "unchanged") {
-    throw new TypeError("Push preview change is invalid");
+    throw new TypeError("推送预览的变更状态无效。");
   }
   return {
     previewToken: requiredString(candidate, "previewToken", "pushPreview"),
@@ -324,10 +324,10 @@ function parsePushPreview(value: unknown): StPushPreview {
 
 function parsePushResult(value: unknown): StPushResult {
   const candidate = unwrap(value, "result");
-  if (!isRecord(candidate)) throw new TypeError("Push result response must be an object");
+  if (!isRecord(candidate)) throw new TypeError("推送结果响应必须是对象。");
   const outcome = candidate.outcome;
   if (outcome !== "created" && outcome !== "overwritten" && outcome !== "unchanged") {
-    throw new TypeError("Push result outcome is invalid");
+    throw new TypeError("推送结果状态无效。");
   }
   return {
     presetName: requiredString(candidate, "presetName", "pushResult"),
@@ -352,7 +352,7 @@ async function readPayload(response: Response): Promise<unknown> {
   try {
     return JSON.parse(text) as unknown;
   } catch (cause) {
-    throw new StApiError("ST connector returned malformed JSON", {
+    throw new StApiError("SillyTavern 连接服务返回了格式错误的 JSON。", {
       method: "RESPONSE",
       url: response.url,
       status: response.status,
@@ -371,7 +371,7 @@ function responseError(
   const envelope = isRecord(payload) && isRecord(payload.error) ? payload.error : payload;
   const error = isRecord(envelope) ? envelope : {};
   return new StApiError(
-    optionalString(error.message) ?? `${method} ${url} failed with ${response.status}`,
+    optionalString(error.message) ?? `请求 ${method} ${url} 失败，HTTP 状态码为 ${response.status}。`,
     {
       method,
       url,
@@ -411,7 +411,7 @@ export class StApiClient implements StApi {
       });
     } catch (cause) {
       if (isAbortError(cause)) throw cause;
-      throw new StApiError("Unable to reach the ST connector service", {
+      throw new StApiError("无法连接 SillyTavern 连接服务。", {
         method: init.method,
         url,
         status: 0,
@@ -441,7 +441,7 @@ export class StApiClient implements StApi {
 
   async connectSession(input: ConnectStSessionInput, options: StRequestOptions = {}) {
     const origin = input.origin.trim();
-    if (!origin) throw new TypeError("SillyTavern origin must not be empty");
+    if (!origin) throw new TypeError("SillyTavern 地址不能为空。");
     const session = parseSession(
       await this.request(ST_API_ENDPOINTS.session, {
         method: "POST",
@@ -449,7 +449,7 @@ export class StApiClient implements StApi {
         signal: options.signal,
       }),
     );
-    if (!session) throw new TypeError("Connect response did not include a session");
+    if (!session) throw new TypeError("连接响应中缺少 SillyTavern 会话。");
     return session;
   }
 
@@ -461,7 +461,7 @@ export class StApiClient implements StApi {
         signal: options.signal,
       }),
     );
-    if (!session) throw new TypeError("Session check did not include a session");
+    if (!session) throw new TypeError("连接检查响应中缺少 SillyTavern 会话。");
     return session;
   }
 
@@ -482,7 +482,7 @@ export class StApiClient implements StApi {
 
   async readPreset(name: string, options: StRequestOptions = {}) {
     const normalized = name.trim();
-    if (!normalized) throw new TypeError("Preset name must not be empty");
+    if (!normalized) throw new TypeError("预设名称不能为空。");
     return parsePresetDocument(
       await this.request(ST_API_ENDPOINTS.readPreset, {
         method: "POST",

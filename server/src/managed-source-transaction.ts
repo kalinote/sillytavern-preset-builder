@@ -3,7 +3,9 @@ import { cp, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 export const MANAGED_SOURCE_PATHS = [
-  "preset.base.json",
+  "preset.settings.json",
+  "preset.prompt-fields.json",
+  "extensions",
   "prompts",
   "regex",
   "scripts",

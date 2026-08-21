@@ -26,7 +26,7 @@ export interface ProjectResourceEntry {
   resourceId: string;
   treePath: string;
   sourcePath?: string;
-  kind: "file" | "directory" | "reference";
+  kind: "file" | "directory";
   pluginId: ProjectPluginId;
   resourceType: ProjectResourceType;
   capabilities: ProjectResourceCapabilities;
@@ -53,7 +53,6 @@ const PLUGIN_ORDER = [
   "regex",
   "tavern-helper",
   "prompt-template",
-  "shared",
   "project",
 ] as const;
 
@@ -63,7 +62,6 @@ const PLUGIN_LABELS: Record<string, string> = {
   regex: "Regex",
   "tavern-helper": "Tavern Helper",
   "prompt-template": "Prompt Template",
-  shared: "共享配置",
   project: "工程管理",
 };
 
@@ -115,6 +113,7 @@ export function buildProjectResourceCatalog(
   const prompts = new Map((structure?.prompts ?? []).map((item) => [item.uid, item]));
   const regex = new Map((structure?.regex ?? []).map((item) => [item.uid, item]));
   const scripts = new Map((structure?.scripts ?? []).map((item) => [item.uid, item]));
+  const filesByPath = new Map(files.filter((file) => file.kind === "file").map((file) => [file.path, file]));
   const pluginLabels = new Map((structure?.plugins ?? []).map((plugin) => [plugin.id, plugin.displayName]));
   const primaryPromptOrder = readPrimaryPromptOrder(structure?.promptOrder ?? []);
   const promptIdentifierCounts = new Map<string, number>();
@@ -135,7 +134,7 @@ export function buildProjectResourceCatalog(
 
   function pluginOrder(pluginId: string): number {
     const knownOrder = PLUGIN_ORDER.indexOf(pluginId as (typeof PLUGIN_ORDER)[number]);
-    return knownOrder === -1 ? PLUGIN_ORDER.indexOf("shared") - 0.5 : knownOrder;
+    return knownOrder === -1 ? PLUGIN_ORDER.indexOf("project") - 0.5 : knownOrder;
   }
 
   function ensureDirectory(
@@ -215,28 +214,6 @@ export function buildProjectResourceCatalog(
     });
   }
 
-  function addConfigReference(
-    file: ProjectFileEntry,
-    pluginId: string,
-    extensionKey: string,
-    displayName: string,
-  ): void {
-    const typePath = ensureResourceType(pluginId, "config");
-    const treePath = `${typePath}/extension-${encodeURIComponent(extensionKey)}`;
-    entries.set(treePath, {
-      resourceId: `reference:${pluginId}:${extensionKey}`,
-      treePath,
-      sourcePath: file.path,
-      kind: "reference",
-      pluginId,
-      resourceType: "config",
-      capabilities: FILE_CAPABILITIES,
-      size: file.size ?? 0,
-      ...(file.updatedAt ? { updatedAt: file.updatedAt } : {}),
-      displayName: `${displayName} 配置（共享基础文件）`,
-    });
-  }
-
   for (const file of files) {
     if (file.kind !== "file") continue;
 
@@ -244,8 +221,15 @@ export function buildProjectResourceCatalog(
       addFile(file, "core/config/preset.json", "core", "config", "完整预设 JSON");
       continue;
     }
-    if (file.path === "preset.base.json") {
-      addFile(file, "core/config/preset.base.json", "core", "config", "请求参数与插件配置");
+    if (file.path.startsWith("extensions/")) {
+      continue;
+    }
+    if (file.path === "preset.settings.json") {
+      addFile(file, "core/config/preset.settings.json", "core", "config", "请求参数与基本配置");
+      continue;
+    }
+    if (file.path === "preset.prompt-fields.json") {
+      addFile(file, "core/config/preset.prompt-fields.json", "core", "config", "预设提示词与标签");
       continue;
     }
     if (file.path === "project.json") {
@@ -348,12 +332,20 @@ export function buildProjectResourceCatalog(
     addFile(file, `project/other/${file.path}`, "project", "other");
   }
 
-  const baseFile = files.find((file) => file.kind === "file" && file.path === "preset.base.json");
   for (const plugin of structure?.plugins ?? []) {
     if (plugin.id === "regex") {
       ensureResourceType("regex", "regex");
-    } else if (baseFile) {
-      addConfigReference(baseFile, plugin.id, plugin.extensionKey, plugin.displayName);
+      continue;
+    }
+    const configFile = filesByPath.get(plugin.configSourcePath);
+    if (configFile) {
+      addFile(
+        configFile,
+        `${plugin.id}/config/extension-config`,
+        plugin.id,
+        "config",
+        `${plugin.displayName} 配置`,
+      );
     }
   }
 

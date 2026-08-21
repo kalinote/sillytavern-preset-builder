@@ -90,18 +90,18 @@ PRESET_STUDIO_PREVIEW_RUNTIME_ENABLED=true
 PRESET_STUDIO_PREVIEW_ORIGIN=http://localhost:3001
 PRESET_STUDIO_PREVIEW_PARENT_ORIGINS=http://127.0.0.1:3001,http://localhost:3001
 
-# 默认只允许回环 ST；连接局域网 ST 时可改为 private，或配置精确 Origin 白名单。
-PRESET_STUDIO_ST_TARGET_POLICY=allowlist
-PRESET_STUDIO_ST_ALLOWED_ORIGINS=http://192.168.1.20:8000
+# 默认允许连接任意 HTTP(S) ST；如需收紧范围，可改为 private 或 allowlist。
+PRESET_STUDIO_ST_TARGET_POLICY=any
+PRESET_STUDIO_ST_ALLOWED_ORIGINS=
 ```
 
 服务级预览开关关闭后，项目中的 JavaScript 允许设置不会被改写；配置的 Preview Host 会继续作为保留隔离域存在，但运行时、固定资源、`/api/*` 和其他路径都会返回 `404`。因此反向代理在开关关闭时也不能把预览子域回退到 Studio 站点。
 
 ST 目标策略：
 
-- `allowlist`（默认）：允许回环目标以及 `PRESET_STUDIO_ST_ALLOWED_ORIGINS` 中的精确 Origin。
+- `allowlist`：允许回环目标以及 `PRESET_STUDIO_ST_ALLOWED_ORIGINS` 中的精确 Origin。
 - `private`：额外允许 IPv4 RFC1918 与 IPv6 ULA，适合 Docker 连接可信 LAN 中的 ST。
-- `any`：允许任意 HTTP(S) 目标；必须显式启用，只能用于完全可信的网络。
+- `any`（默认）：允许任意 HTTP(S) 目标，只能用于完全可信的网络。
 
 连接远端目标会使 Node 发起服务端网络请求。link-local（如 `169.254/16`、`fe80::/10`）、unspecified、multicast/reserved 和云 metadata 地址在所有策略下始终拒绝；每次请求都会重新解析 DNS 并固定到当次已校验的地址，重定向也始终拒绝。不要把 `private` 或 `any` 与无鉴权公网部署组合使用；如果必须对公网开放 Preset Studio，请在反向代理增加 HTTPS 和独立访问控制。第一版自身没有用户系统。
 
@@ -111,7 +111,9 @@ ST 目标策略：
 
 ```text
 project.json
-preset.base.json
+preset.settings.json
+preset.prompt-fields.json
+extensions/ext-<base64url(extension-key)>.json
 prompts/<uid>/{meta.json,content.md}
 regex/<uid>/{meta.json,find.txt,replace.html}
 scripts/<uid>/{meta.json,content.js}
