@@ -104,7 +104,9 @@ export type StLiveBridgeOutcome =
   | "installed"
   | "already-installed"
   | "updated"
-  | "already-up-to-date";
+  | "already-up-to-date"
+  | "uninstalled"
+  | "already-uninstalled";
 
 export interface StLiveBridgeMutationResult {
   liveBridge: StLiveBridgeStatus;
@@ -141,6 +143,7 @@ export interface StApi {
   getLiveBridgeStatus(options?: StRequestOptions): Promise<StLiveBridgeStatus>;
   installLiveBridge(options?: StRequestOptions): Promise<StLiveBridgeMutationResult>;
   updateLiveBridge(options?: StRequestOptions): Promise<StLiveBridgeMutationResult>;
+  uninstallLiveBridge(options?: StRequestOptions): Promise<StLiveBridgeMutationResult>;
 }
 
 export interface StApiClientOptions {
@@ -191,6 +194,7 @@ export const ST_API_ENDPOINTS = {
   liveBridge: `${ST_API_ROOT}/live-bridge`,
   installLiveBridge: `${ST_API_ROOT}/live-bridge/install`,
   updateLiveBridge: `${ST_API_ROOT}/live-bridge/update`,
+  uninstallLiveBridge: `${ST_API_ROOT}/live-bridge/uninstall`,
   pushPreview: (projectId: string) =>
     `${PROJECT_API_ROOT}/${encodeURIComponent(projectId)}/push-preview`,
   pushPreset: (projectId: string) =>
@@ -339,6 +343,8 @@ function parseLiveBridgeMutation(value: unknown): StLiveBridgeMutationResult {
     && outcome !== "already-installed"
     && outcome !== "updated"
     && outcome !== "already-up-to-date"
+    && outcome !== "uninstalled"
+    && outcome !== "already-uninstalled"
   ) {
     throw new TypeError("Live Bridge 操作结果无效。");
   }
@@ -635,6 +641,16 @@ export class StApiClient implements StApi {
   async updateLiveBridge(options: StRequestOptions = {}) {
     return parseLiveBridgeMutation(
       await this.request(ST_API_ENDPOINTS.updateLiveBridge, {
+        method: "POST",
+        body: {},
+        signal: options.signal,
+      }),
+    );
+  }
+
+  async uninstallLiveBridge(options: StRequestOptions = {}) {
+    return parseLiveBridgeMutation(
+      await this.request(ST_API_ENDPOINTS.uninstallLiveBridge, {
         method: "POST",
         body: {},
         signal: options.signal,

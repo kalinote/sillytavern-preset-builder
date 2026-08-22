@@ -405,6 +405,15 @@ export class SillyTavern118Adapter {
     ));
   }
 
+  async deleteExtension(extensionName: string): Promise<void> {
+    this.assertSupported();
+    const response = await this.postProtected(
+      "/api/extensions/delete",
+      { extensionName, global: false },
+    );
+    requireExtensionSuccess(response, "卸载扩展", "ST_EXTENSION_NOT_FOUND");
+  }
+
   clearSensitiveState(): void {
     delete this.csrfToken;
     this.client.clearSensitiveState();

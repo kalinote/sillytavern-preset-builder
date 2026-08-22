@@ -38,6 +38,7 @@ export type StLiveBridgeOperation =
   | "check"
   | "install"
   | "update"
+  | "uninstall"
   | null;
 
 export interface UseStConnectionResult {
@@ -69,6 +70,7 @@ export interface UseStConnectionResult {
   checkLiveBridge: () => Promise<StLiveBridgeStatus>;
   installLiveBridge: () => Promise<StLiveBridgeMutationResult>;
   updateLiveBridge: () => Promise<StLiveBridgeMutationResult>;
+  uninstallLiveBridge: () => Promise<StLiveBridgeMutationResult>;
   clearError: () => void;
 }
 
@@ -639,6 +641,14 @@ export function useStConnection(
     [api, mutateLiveBridge],
   );
 
+  const uninstallLiveBridge = useCallback(
+    () => mutateLiveBridge(
+      "uninstall",
+      (signal) => api.uninstallLiveBridge({ signal }),
+    ),
+    [api, mutateLiveBridge],
+  );
+
   const presets = useMemo(() => catalog?.presets ?? [], [catalog?.presets]);
   const clearError = useCallback(() => setError(null), []);
 
@@ -665,6 +675,7 @@ export function useStConnection(
     checkLiveBridge,
     installLiveBridge,
     updateLiveBridge,
+    uninstallLiveBridge,
     clearError,
   };
 }

@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Server,
   ShieldCheck,
+  Trash2,
   UserRound,
   WifiOff,
 } from "lucide-react";
@@ -55,6 +56,7 @@ interface ConnectionDialogProps {
   onCheckLiveBridge: () => Promise<StLiveBridgeStatus>;
   onInstallLiveBridge: () => Promise<StLiveBridgeMutationResult>;
   onUpdateLiveBridge: () => Promise<StLiveBridgeMutationResult>;
+  onUninstallLiveBridge: () => Promise<StLiveBridgeMutationResult>;
 }
 
 export function ConnectionDialog({
@@ -77,10 +79,14 @@ export function ConnectionDialog({
   onCheckLiveBridge,
   onInstallLiveBridge,
   onUpdateLiveBridge,
+  onUninstallLiveBridge,
 }: ConnectionDialogProps) {
   const connected = session?.status === "connected";
   const sessionBusy = operation !== null || isRefreshing;
-  const busy = sessionBusy || liveBridgeOperation === "install" || liveBridgeOperation === "update";
+  const busy = sessionBusy
+    || liveBridgeOperation === "install"
+    || liveBridgeOperation === "update"
+    || liveBridgeOperation === "uninstall";
 
   useEffect(() => {
     if (
@@ -120,6 +126,7 @@ export function ConnectionDialog({
                 onCheck={onCheckLiveBridge}
                 onInstall={onInstallLiveBridge}
                 onUpdate={onUpdateLiveBridge}
+                onUninstall={onUninstallLiveBridge}
               />
             ) : null}
             {!connected ? (
@@ -199,7 +206,7 @@ export function ConnectionDialog({
 
 const LIVE_BRIDGE_REPOSITORY = "https://github.com/kalinote/SPB-live-bridge.git";
 
-type LiveBridgeConfirmation = "install" | "update" | null;
+type LiveBridgeConfirmation = "install" | "update" | "uninstall" | null;
 
 function LiveBridgeCard({
   status,
@@ -209,6 +216,7 @@ function LiveBridgeCard({
   onCheck,
   onInstall,
   onUpdate,
+  onUninstall,
 }: {
   status: StLiveBridgeStatus | null;
   operation: StLiveBridgeOperation;
@@ -217,6 +225,7 @@ function LiveBridgeCard({
   onCheck: () => Promise<StLiveBridgeStatus>;
   onInstall: () => Promise<StLiveBridgeMutationResult>;
   onUpdate: () => Promise<StLiveBridgeMutationResult>;
+  onUninstall: () => Promise<StLiveBridgeMutationResult>;
 }) {
   const [confirmation, setConfirmation] = useState<LiveBridgeConfirmation>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -226,11 +235,14 @@ function LiveBridgeCard({
   const primaryAction = state === "not-installed"
     ? "install"
     : state === "update-available" ? "update" : null;
+  const canUninstall = state === "installed" || state === "update-available";
 
   const runMutation = async (action: Exclude<LiveBridgeConfirmation, null>) => {
     setConfirmation(null);
     setNotice(null);
-    const result = action === "install" ? await onInstall() : await onUpdate();
+    const result = action === "install"
+      ? await onInstall()
+      : action === "update" ? await onUpdate() : await onUninstall();
     setNotice(liveBridgeOutcomeLabel(result.outcome));
   };
 
@@ -300,7 +312,7 @@ function LiveBridgeCard({
         ) : null}
         {status?.requiresStReload ? (
           <div className="rounded-lg border border-warning/20 bg-warning-soft px-3 py-2 text-xs leading-5 text-warning">
-            请刷新或重新打开 SillyTavern 页面以加载扩展文件；无需重启 ST 服务。
+            请刷新或重新打开 SillyTavern 页面以应用扩展变更；无需重启 ST 服务。
           </div>
         ) : null}
       </div>
@@ -308,20 +320,27 @@ function LiveBridgeCard({
       {confirmation ? (
         <div className="rounded-xl border border-warning/25 bg-warning-soft/55 p-3">
           <p className="text-xs font-medium">
-            {confirmation === "install" ? "确认安装 Live Bridge？" : "确认更新 Live Bridge？"}
+            {liveBridgeConfirmationTitle(confirmation)}
           </p>
           <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
             {confirmation === "install"
               ? "SillyTavern 将从上方固定仓库安装到当前 ST 用户；不会影响其他用户，也不会修改任何 preset。"
-              : "SillyTavern 将从已验证的固定来源更新当前用户的扩展文件；不会覆盖来源不匹配的同名扩展。"}
+              : confirmation === "update"
+                ? "SillyTavern 将从已验证的固定来源更新当前用户的扩展文件；不会覆盖来源不匹配的同名扩展。"
+                : "SillyTavern 将删除当前用户下来源与分支均已验证的 Live Bridge 文件；不会影响 preset 或其他 ST 用户。刷新 ST 页面后已加载的扩展代码才会退出。"}
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirmation(null)}>
               取消
             </Button>
-            <Button size="sm" disabled={busy} onClick={() => runSafely(() => runMutation(confirmation))}>
-              {busy ? <LoaderCircle className="animate-spin" /> : confirmation === "install" ? <Download /> : <RefreshCw />}
-              {confirmation === "install" ? "确认安装" : "确认更新"}
+            <Button
+              variant={confirmation === "uninstall" ? "destructive" : "default"}
+              size="sm"
+              disabled={busy}
+              onClick={() => runSafely(() => runMutation(confirmation))}
+            >
+              {busy ? <LoaderCircle className="animate-spin" /> : liveBridgeConfirmationIcon(confirmation)}
+              {liveBridgeConfirmationActionLabel(confirmation)}
             </Button>
           </div>
         </div>
@@ -345,6 +364,17 @@ function LiveBridgeCard({
               {primaryAction === "install" ? "安装到当前 ST 用户" : "更新 Live Bridge"}
             </Button>
           ) : null}
+          {canUninstall ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={busy}
+              onClick={() => setConfirmation("uninstall")}
+            >
+              <Trash2 />
+              卸载 Live Bridge
+            </Button>
+          ) : null}
         </div>
       )}
     </section>
@@ -355,6 +385,7 @@ function liveBridgeStatusLabel(status: StLiveBridgeStatus | null, operation: StL
   if (operation === "check") return "正在检查";
   if (operation === "install") return "正在安装";
   if (operation === "update") return "正在更新";
+  if (operation === "uninstall") return "正在卸载";
   if (!status) return "尚未检查";
   if (status.state === "not-installed") return "未安装";
   if (status.state === "installed") return "已安装";
@@ -366,9 +397,9 @@ function liveBridgeStatusLabel(status: StLiveBridgeStatus | null, operation: StL
 function liveBridgeStatusDescription(status: StLiveBridgeStatus | null) {
   if (!status) return "只在使用真实 ST 页面预览、Prompt 捕获等实时调试功能时需要安装；Preset 读取、保存与工程编辑不受影响。";
   if (status.state === "not-installed") return "当前用户尚未安装。基础 Preset 读取、保存与工程编辑无需此扩展。";
-  if (status.state === "installed") return "基础扩展已就绪；当前版本只提供安装与更新管理，实时桥接能力将在后续版本启用。";
+  if (status.state === "installed") return "已安装到当前 ST 用户。0.1.x 不提供 ST 设置面板，因此不会出现在“扩展设置”区域；可在 ST 的“管理扩展”列表中查看。";
   if (status.state === "update-available") return "固定来源中存在更新，可由 SillyTavern 直接拉取，无需填写 Git 地址或移动文件。";
-  if (status.state === "source-mismatch") return "检测到同名扩展，但来源或分支不是受信任发布目标。为避免意外覆盖，Studio 不会安装或更新它。";
+  if (status.state === "source-mismatch") return "检测到同名扩展，但来源或分支不是受信任发布目标。为避免误操作，Studio 不会安装、更新或卸载它。";
   return "当前 SillyTavern 无法使用扩展管理接口；基础 Preset 功能仍可正常使用。";
 }
 
@@ -376,7 +407,27 @@ function liveBridgeOutcomeLabel(outcome: StLiveBridgeMutationResult["outcome"]) 
   if (outcome === "installed") return "Live Bridge 已安装。";
   if (outcome === "already-installed") return "Live Bridge 已安装，无需重复操作。";
   if (outcome === "updated") return "Live Bridge 已更新。";
+  if (outcome === "uninstalled") return "Live Bridge 已卸载。请刷新 SillyTavern 页面。";
+  if (outcome === "already-uninstalled") return "Live Bridge 已处于未安装状态。";
   return "Live Bridge 已是最新提交。";
+}
+
+function liveBridgeConfirmationTitle(confirmation: Exclude<LiveBridgeConfirmation, null>) {
+  if (confirmation === "install") return "确认安装 Live Bridge？";
+  if (confirmation === "update") return "确认更新 Live Bridge？";
+  return "确认卸载 Live Bridge？";
+}
+
+function liveBridgeConfirmationActionLabel(confirmation: Exclude<LiveBridgeConfirmation, null>) {
+  if (confirmation === "install") return "确认安装";
+  if (confirmation === "update") return "确认更新";
+  return "确认卸载";
+}
+
+function liveBridgeConfirmationIcon(confirmation: Exclude<LiveBridgeConfirmation, null>) {
+  if (confirmation === "install") return <Download />;
+  if (confirmation === "update") return <RefreshCw />;
+  return <Trash2 />;
 }
 
 function ConnectionForm({

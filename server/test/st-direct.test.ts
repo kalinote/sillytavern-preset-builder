@@ -214,6 +214,19 @@ async function createMockSt(options: MockStOptions = {}) {
       });
       return;
     }
+    if (url.pathname === "/api/extensions/delete" && request.method === "POST") {
+      const body = await requestJson(request);
+      log.body = body;
+      if (!liveBridgeInstalled) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      liveBridgeInstalled = false;
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      response.end("OK");
+      return;
+    }
     response.writeHead(404);
     response.end();
   });
@@ -359,6 +372,7 @@ test("direct ST session supports cookies, CSRF refresh, catalog/read/create, and
       "extension.install",
       "extension.version",
       "extension.update",
+      "extension.delete",
     ]);
     assert.equal(connectedBody.session.userHandle, "alice");
     assert.equal(mock.logs.find((entry) => entry.path === "/csrf-token" && entry.authorization)?.authorization,
@@ -537,7 +551,7 @@ test("direct ST session supports cookies, CSRF refresh, catalog/read/create, and
   }
 });
 
-test("Live Bridge is managed from the fixed local repository with guarded install and update", async () => {
+test("Live Bridge is managed from the fixed local repository with guarded install, update, and uninstall", async () => {
   const root = await mkdtemp(join(tmpdir(), "preset-studio-live-bridge-"));
   const mock = await createMockSt();
   const { server, stSessions } = createApiServer({
@@ -600,6 +614,15 @@ test("Live Bridge is managed from the fixed local repository with guarded instal
     assert.equal((await injectedInstall.json() as { error: { code: string } }).error.code, "INVALID_INPUT");
     assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/install").length, installCount);
 
+    const deleteCount = mock.logs.filter((entry) => entry.path === "/api/extensions/delete").length;
+    const injectedUninstall = await jsonFetch(baseUrl, "/api/st/live-bridge/uninstall", {
+      cookie,
+      body: { extensionName: "another-extension", global: true },
+    });
+    assert.equal(injectedUninstall.status, 400);
+    assert.equal((await injectedUninstall.json() as { error: { code: string } }).error.code, "INVALID_INPUT");
+    assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/delete").length, deleteCount);
+
     // Git-backed extension operations have a controlled timeout longer than the normal ST request timeout.
     mock.setExtensionDelay(150);
     const installed = await jsonFetch(baseUrl, "/api/st/live-bridge/install", { cookie, body: {} });
@@ -646,6 +669,13 @@ test("Live Bridge is managed from the fixed local repository with guarded instal
       "ST_LIVE_BRIDGE_SOURCE_MISMATCH",
     );
     assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/update").length, updateCount);
+    const refusedUninstall = await jsonFetch(baseUrl, "/api/st/live-bridge/uninstall", { cookie, body: {} });
+    assert.equal(refusedUninstall.status, 409);
+    assert.equal(
+      (await refusedUninstall.json() as { error: { code: string } }).error.code,
+      "ST_LIVE_BRIDGE_SOURCE_MISMATCH",
+    );
+    assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/delete").length, deleteCount);
 
     mock.setLiveBridgeRemote("https://github.com/kalinote/SPB-live-bridge.git");
     mock.setLiveBridgeBranch("feature");
@@ -685,10 +715,41 @@ test("Live Bridge is managed from the fixed local repository with guarded instal
     assert.equal(alreadyCurrentBody.outcome, "already-up-to-date");
     assert.equal(alreadyCurrentBody.liveBridge.requiresStReload, false);
 
+    const uninstalled = await jsonFetch(baseUrl, "/api/st/live-bridge/uninstall", { cookie, body: {} });
+    assert.equal(uninstalled.status, 200);
+    const uninstalledText = await uninstalled.text();
+    assert.doesNotMatch(uninstalledText, /extensionPath|sensitive/i);
+    const uninstalledBody = JSON.parse(uninstalledText) as {
+      outcome: string;
+      liveBridge: { state: string; requiresStReload: boolean };
+    };
+    assert.equal(uninstalledBody.outcome, "uninstalled");
+    assert.equal(uninstalledBody.liveBridge.state, "not-installed");
+    assert.equal(uninstalledBody.liveBridge.requiresStReload, true);
+    assert.equal(mock.isLiveBridgeInstalled(), false);
+    assert.deepEqual(mock.logs.find((entry) => entry.path === "/api/extensions/delete")?.body, {
+      extensionName: "SPB-live-bridge",
+      global: false,
+    });
+
+    const alreadyUninstalled = await jsonFetch(baseUrl, "/api/st/live-bridge/uninstall", { cookie, body: {} });
+    assert.equal(alreadyUninstalled.status, 200);
+    const alreadyUninstalledBody = await alreadyUninstalled.json() as {
+      outcome: string;
+      liveBridge: { state: string; requiresStReload: boolean };
+    };
+    assert.equal(alreadyUninstalledBody.outcome, "already-uninstalled");
+    assert.equal(alreadyUninstalledBody.liveBridge.state, "not-installed");
+    assert.equal(alreadyUninstalledBody.liveBridge.requiresStReload, false);
+    assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/delete").length, deleteCount + 1);
+
     for (const entry of mock.logs.filter((item) => item.path === "/api/extensions/version")) {
       assert.deepEqual(entry.body, { extensionName: "SPB-live-bridge", global: false });
     }
     for (const entry of mock.logs.filter((item) => item.path === "/api/extensions/update")) {
+      assert.deepEqual(entry.body, { extensionName: "SPB-live-bridge", global: false });
+    }
+    for (const entry of mock.logs.filter((item) => item.path === "/api/extensions/delete")) {
       assert.deepEqual(entry.body, { extensionName: "SPB-live-bridge", global: false });
     }
   } finally {

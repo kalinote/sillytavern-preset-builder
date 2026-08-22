@@ -12,7 +12,7 @@
 - HTML/CSS 静态预览，以及由项目开关和手动启动控制的独立 Origin 动态 HTML/JavaScript 预览。
 - 构建、带版本和时间戳的 JSON 导出，以及 Docker 工作区持久化。
 - Node 服务直接连接已有的 SillyTavern 1.18.x，不需要安装 ST 扩展；可列出/读取 Chat Completion presets，并从所选 preset 创建一次性工程快照。
-- 可选的 Preset Studio Live Bridge 只面向后续真实 ST 页面调试；基础 preset 检查、同步和推送始终不依赖该扩展。当前 `0.1.x` 仅打通扩展检测、安装和更新链路，尚未提供实时调试能力。
+- 可选的 Preset Studio Live Bridge 只面向后续真实 ST 页面调试；基础 preset 检查、同步和推送始终不依赖该扩展。当前 `0.1.x` 仅打通扩展检测、安装、更新和卸载链路，尚未提供实时调试能力。
 - 推送前生成绑定当前工程和远端目标的短时预览，用户确认后手动保存 preset 到 ST。
 - 在目录树中创建、复制、重命名、删除和排序 Prompt、Regex、Script；物理目录继续使用稳定 UUID。
 - 在检查器中局部维护高频安全属性，并用结构化 Prompt Order 编辑器维护运行时引用与启用状态。
@@ -42,7 +42,7 @@
 3. Node 通过 ST 的 CSRF、登录、settings 和 preset HTTP API 建立内存会话；浏览器只得到 Preset Studio 自己的 opaque HttpOnly 会话 Cookie。
 4. 连接后选择一个 Chat Completion preset 创建工程，或在工程中先执行“推送预览”，再明确确认保存。
 
-只有在未来使用真实 ST 页面调试功能时才需要按界面提示安装 Live Bridge。扩展是可选组件，不会在普通连接、preset 同步或保存流程中强制安装；当前 `0.1.x` 版本只用于验证扩展检测、安装和更新。
+只有在未来使用真实 ST 页面调试功能时才需要按界面提示安装 Live Bridge。扩展是可选组件，不会在普通连接、preset 同步或保存流程中强制安装；当前 `0.1.x` 版本只用于验证扩展检测、安装、更新和卸载。它没有 ST 设置面板；安装后请在 ST 的“管理扩展”列表查看，并刷新 ST 页面加载或卸载代码，无需重启服务。
 
 Docker 中的 `127.0.0.1` 指向 Preset Studio 容器自身，不是宿主机。ST 在宿主机运行时，请使用容器可达的 LAN 地址，或在支持的平台使用 `host.docker.internal`；该 Origin 仍需满足下述 target policy。
 

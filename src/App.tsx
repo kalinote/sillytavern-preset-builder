@@ -725,6 +725,7 @@ export default function App() {
           onCheckLiveBridge={st.checkLiveBridge}
           onInstallLiveBridge={st.installLiveBridge}
           onUpdateLiveBridge={st.updateLiveBridge}
+          onUninstallLiveBridge={st.uninstallLiveBridge}
         />
 
         {workspace.project && pushDialogOpen ? (

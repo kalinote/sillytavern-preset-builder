@@ -16,7 +16,7 @@ import type { Diagnostic } from "./types.js";
 export const ST_SESSION_COOKIE = "preset_studio_st_session";
 export const ST_CAPABILITIES = [
   "preset.list", "preset.read", "preset.save",
-  "extension.discover", "extension.install", "extension.version", "extension.update",
+  "extension.discover", "extension.install", "extension.version", "extension.update", "extension.delete",
 ] as const;
 export const ST_LIVE_BRIDGE_REPOSITORY_URL = "https://github.com/kalinote/SPB-live-bridge.git";
 export const ST_LIVE_BRIDGE_EXTENSION_NAME = "SPB-live-bridge";
@@ -432,6 +432,60 @@ export class StSessionManager {
             checkedAt: new Date(this.options.now()).toISOString(),
           },
           outcome: changed ? "updated" as const : "already-up-to-date" as const,
+        };
+      })
+    ));
+  }
+
+  async uninstallLiveBridge(token: string | undefined): Promise<{
+    liveBridge: StLiveBridgeStatus;
+    outcome: "uninstalled" | "already-uninstalled";
+  }> {
+    const record = this.requireUsableRecord(token);
+    return this.withTargetCommitLock(`${record.origin}\0extension:${ST_LIVE_BRIDGE_EXTENSION_NAME}`, () => (
+      this.runRemote(record, async () => {
+        const current = await this.inspectLiveBridge(record, false);
+        if (current.state === "unavailable") {
+          throw new ApiError(409, "ST_EXTENSIONS_UNAVAILABLE", "SillyTavern 扩展功能未启用或扩展管理接口不可用。");
+        }
+        if (current.state === "source-mismatch") {
+          throw new ApiError(
+            409,
+            "ST_LIVE_BRIDGE_SOURCE_MISMATCH",
+            "同名 SillyTavern 扩展的仓库或分支不可信，已拒绝卸载。",
+          );
+        }
+        if (current.state === "not-installed") {
+          return { liveBridge: current, outcome: "already-uninstalled" as const };
+        }
+
+        try {
+          await record.adapter.deleteExtension(ST_LIVE_BRIDGE_EXTENSION_NAME);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.code !== "ST_EXTENSION_NOT_FOUND") {
+            throw error;
+          }
+          const raced = await this.inspectLiveBridge(record, false);
+          if (raced.state === "not-installed") {
+            return {
+              liveBridge: { ...raced, requiresStReload: true },
+              outcome: "already-uninstalled" as const,
+            };
+          }
+          throw error;
+        }
+
+        const liveBridge = await this.inspectLiveBridge(record, false);
+        if (liveBridge.state !== "not-installed") {
+          throw new ApiError(
+            502,
+            "ST_LIVE_BRIDGE_UNINSTALL_VERIFY_FAILED",
+            "无法验证 SillyTavern Live Bridge 的卸载结果。",
+          );
+        }
+        return {
+          liveBridge: { ...liveBridge, requiresStReload: true },
+          outcome: "uninstalled" as const,
         };
       })
     ));
