@@ -29,6 +29,35 @@ export interface StPresetCatalog {
   refreshedAt: string;
 }
 
+export type StExtensionType = "system" | "local" | "global";
+
+export interface StExtensionEntry {
+  type: StExtensionType;
+  name: string;
+}
+
+export interface StExtensionInstallResult {
+  folderName: string;
+  version?: string;
+  author?: string;
+  displayName?: string;
+}
+
+export interface StExtensionVersionResult {
+  currentBranchName: string;
+  currentCommitHash: string;
+  isUpToDate: boolean;
+  remoteUrl: string;
+}
+
+export interface StExtensionUpdateResult {
+  shortCommitHash: string;
+  isUpToDate: boolean;
+  remoteUrl: string;
+}
+
+const EXTENSION_GIT_REQUEST_TIMEOUT_MS = 305_000;
+
 interface ParsedSettingsResponse {
   presets: StPresetSnapshot[];
   persistedSelectedPresetName?: string;
@@ -63,6 +92,30 @@ function responseError(response: StHttpResponse, operation: string): ApiError {
   return new ApiError(502, "ST_REMOTE_ERROR", `SillyTavern 的“${operation}”请求失败。`, {
     status: response.status,
   });
+}
+
+function extensionResponseError(
+  response: StHttpResponse,
+  operation: string,
+  notFoundCode: "ST_EXTENSIONS_UNAVAILABLE" | "ST_EXTENSION_NOT_FOUND",
+): ApiError {
+  if (response.status === 404) {
+    return notFoundCode === "ST_EXTENSIONS_UNAVAILABLE"
+      ? new ApiError(409, notFoundCode, "SillyTavern 扩展功能未启用或扩展管理接口不可用。")
+      : new ApiError(404, notFoundCode, "SillyTavern 中不存在该扩展。");
+  }
+  if (response.status === 409) {
+    return new ApiError(409, "ST_EXTENSION_CONFLICT", `SillyTavern 的“${operation}”操作与现有扩展冲突。`);
+  }
+  return responseError(response, operation);
+}
+
+function requireExtensionSuccess(
+  response: StHttpResponse,
+  operation: string,
+  notFoundCode: "ST_EXTENSIONS_UNAVAILABLE" | "ST_EXTENSION_NOT_FOUND",
+): void {
+  if (response.status !== 200) throw extensionResponseError(response, operation, notFoundCode);
 }
 
 function requireSuccess(response: StHttpResponse, operation: string, allowed: readonly number[] = [200]): void {
@@ -123,6 +176,75 @@ function selectedPresetName(settingsValue: unknown): string | undefined {
   return typeof openAiSettings.preset_settings_openai === "string" && openAiSettings.preset_settings_openai
     ? openAiSettings.preset_settings_openai
     : undefined;
+}
+
+function responseString(value: unknown, field: string, allowEmpty = false): string {
+  if (typeof value !== "string" || (!allowEmpty && !value) || Buffer.byteLength(value, "utf8") > 8192) {
+    throw new ApiError(502, "ST_RESPONSE_INVALID", `SillyTavern 返回的扩展字段 ${field} 无效。`);
+  }
+  return value;
+}
+
+function optionalResponseString(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  return responseString(value, field, true);
+}
+
+function parseExtensionEntries(response: StHttpResponse): StExtensionEntry[] {
+  requireExtensionSuccess(response, "发现扩展", "ST_EXTENSIONS_UNAVAILABLE");
+  if (!Array.isArray(response.json) || response.json.length > 10_000) {
+    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的扩展目录无效。");
+  }
+  return response.json.map((value) => {
+    if (!isJsonObject(value) || !["system", "local", "global"].includes(String(value.type))) {
+      throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的扩展目录包含无效条目。");
+    }
+    return {
+      type: value.type as StExtensionType,
+      name: responseString(value.name, "name"),
+    };
+  });
+}
+
+function parseExtensionInstall(response: StHttpResponse): StExtensionInstallResult {
+  requireExtensionSuccess(response, "安装扩展", "ST_EXTENSIONS_UNAVAILABLE");
+  if (!isJsonObject(response.json)) {
+    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的扩展安装结果无效。");
+  }
+  const version = optionalResponseString(response.json.version, "version");
+  const author = optionalResponseString(response.json.author, "author");
+  const displayName = optionalResponseString(response.json.display_name, "display_name");
+  return {
+    folderName: responseString(response.json.folderName, "folderName"),
+    ...(version === undefined ? {} : { version }),
+    ...(author === undefined ? {} : { author }),
+    ...(displayName === undefined ? {} : { displayName }),
+  };
+}
+
+function parseExtensionVersion(response: StHttpResponse): StExtensionVersionResult {
+  requireExtensionSuccess(response, "检查扩展版本", "ST_EXTENSION_NOT_FOUND");
+  if (!isJsonObject(response.json) || typeof response.json.isUpToDate !== "boolean") {
+    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的扩展版本结果无效。");
+  }
+  return {
+    currentBranchName: responseString(response.json.currentBranchName, "currentBranchName", true),
+    currentCommitHash: responseString(response.json.currentCommitHash, "currentCommitHash", true),
+    isUpToDate: response.json.isUpToDate,
+    remoteUrl: responseString(response.json.remoteUrl, "remoteUrl", true),
+  };
+}
+
+function parseExtensionUpdate(response: StHttpResponse): StExtensionUpdateResult {
+  requireExtensionSuccess(response, "更新扩展", "ST_EXTENSION_NOT_FOUND");
+  if (!isJsonObject(response.json) || typeof response.json.isUpToDate !== "boolean") {
+    throw new ApiError(502, "ST_RESPONSE_INVALID", "SillyTavern 返回的扩展更新结果无效。");
+  }
+  return {
+    shortCommitHash: responseString(response.json.shortCommitHash, "shortCommitHash"),
+    isUpToDate: response.json.isUpToDate,
+    remoteUrl: responseString(response.json.remoteUrl, "remoteUrl", true),
+  };
 }
 
 function parseSettings(response: StHttpResponse): ParsedSettingsResponse {
@@ -251,6 +373,38 @@ export class SillyTavern118Adapter {
     }
   }
 
+  async discoverExtensions(): Promise<StExtensionEntry[]> {
+    this.assertSupported();
+    return parseExtensionEntries(await this.client.request("/api/extensions/discover"));
+  }
+
+  async installExtension(url: string, branch: string): Promise<StExtensionInstallResult> {
+    this.assertSupported();
+    return parseExtensionInstall(await this.postProtected(
+      "/api/extensions/install",
+      { url, global: false, branch },
+      EXTENSION_GIT_REQUEST_TIMEOUT_MS,
+    ));
+  }
+
+  async extensionVersion(extensionName: string): Promise<StExtensionVersionResult> {
+    this.assertSupported();
+    return parseExtensionVersion(await this.postProtected(
+      "/api/extensions/version",
+      { extensionName, global: false },
+      EXTENSION_GIT_REQUEST_TIMEOUT_MS,
+    ));
+  }
+
+  async updateExtension(extensionName: string): Promise<StExtensionUpdateResult> {
+    this.assertSupported();
+    return parseExtensionUpdate(await this.postProtected(
+      "/api/extensions/update",
+      { extensionName, global: false },
+      EXTENSION_GIT_REQUEST_TIMEOUT_MS,
+    ));
+  }
+
   clearSensitiveState(): void {
     delete this.csrfToken;
     this.client.clearSensitiveState();
@@ -304,15 +458,28 @@ export class SillyTavern118Adapter {
     requireSuccess(response, "连接检查", [200, 204]);
   }
 
-  private async postProtected(path: string, body: unknown): Promise<StHttpResponse> {
+  private async postProtected(
+    path: string,
+    body: unknown,
+    requestTimeoutMs?: number,
+  ): Promise<StHttpResponse> {
     if (!this.csrfToken) await this.refreshCsrf();
-    let response = await this.client.request(path, { method: "POST", body, csrfToken: this.requireCsrfToken() });
+    const requestOptions = {
+      method: "POST" as const,
+      body,
+      csrfToken: this.requireCsrfToken(),
+      ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
+    };
+    let response = await this.client.request(path, requestOptions);
     if (response.status === 403) {
       // ST rotates the synchronizer token with its cookie session. All v1
       // protected operations are safe to replay once because CSRF middleware
       // rejects before their route handler runs.
       await this.refreshCsrf();
-      response = await this.client.request(path, { method: "POST", body, csrfToken: this.requireCsrfToken() });
+      response = await this.client.request(path, {
+        ...requestOptions,
+        csrfToken: this.requireCsrfToken(),
+      });
     }
     return response;
   }

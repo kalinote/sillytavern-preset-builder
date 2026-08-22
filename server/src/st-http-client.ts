@@ -23,6 +23,13 @@ export interface StHttpResponse {
   json: unknown;
 }
 
+export interface StHttpRequestOptions {
+  method?: "GET" | "POST";
+  body?: unknown;
+  csrfToken?: string;
+  requestTimeoutMs?: number;
+}
+
 interface ResolvedAddress {
   address: string;
   family: 4 | 6;
@@ -263,7 +270,7 @@ export class StHttpClient {
 
   async request(
     path: string,
-    options: { method?: "GET" | "POST"; body?: unknown; csrfToken?: string } = {},
+    options: StHttpRequestOptions = {},
   ): Promise<StHttpResponse> {
     if (!path.startsWith("/") || path.startsWith("//")) {
       throw new ApiError(500, "ST_CLIENT_PATH_INVALID", "内部 SillyTavern 请求路径无效。");
@@ -279,6 +286,7 @@ export class StHttpClient {
       this.options.connectTimeoutMs,
     );
     const method = options.method ?? "GET";
+    const requestTimeoutMs = options.requestTimeoutMs ?? this.options.requestTimeoutMs;
     const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body));
     const cookie = this.cookieJar.header();
     const headers: Record<string, string | number> = {
@@ -299,7 +307,7 @@ export class StHttpClient {
       let connectTimer: NodeJS.Timeout | undefined;
       const overallTimer = setTimeout(() => {
         request.destroy(new ApiError(504, "ST_TIMEOUT", "SillyTavern 请求超时。"));
-      }, this.options.requestTimeoutMs);
+      }, requestTimeoutMs);
       overallTimer.unref();
       const finishReject = (error: unknown) => {
         if (settled) return;

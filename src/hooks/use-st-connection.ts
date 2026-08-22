@@ -6,6 +6,8 @@ import {
   stApi,
   type ConnectStSessionInput,
   type StApi,
+  type StLiveBridgeMutationResult,
+  type StLiveBridgeStatus,
   type StPresetCatalog,
   type StPresetDocument,
   type StPushMode,
@@ -32,6 +34,12 @@ export type StOperation =
   | "commit"
   | null;
 
+export type StLiveBridgeOperation =
+  | "check"
+  | "install"
+  | "update"
+  | null;
+
 export interface UseStConnectionResult {
   session: StSession | null;
   catalog: StPresetCatalog | null;
@@ -43,6 +51,9 @@ export interface UseStConnectionResult {
   isRefreshingSession: boolean;
   refreshSession: () => Promise<StSession | null>;
   connectSession: (input: ConnectStSessionInput) => Promise<StSession>;
+  liveBridge: StLiveBridgeStatus | null;
+  liveBridgeError: Error | null;
+  liveBridgeOperation: StLiveBridgeOperation;
   checkSession: () => Promise<StSession>;
   disconnectSession: () => Promise<void>;
   refreshPresets: () => Promise<StPresetCatalog>;
@@ -55,6 +66,9 @@ export interface UseStConnectionResult {
     projectId: string,
     previewToken: string,
   ) => Promise<StPushResult>;
+  checkLiveBridge: () => Promise<StLiveBridgeStatus>;
+  installLiveBridge: () => Promise<StLiveBridgeMutationResult>;
+  updateLiveBridge: () => Promise<StLiveBridgeMutationResult>;
   clearError: () => void;
 }
 
@@ -118,6 +132,9 @@ export function useStConnection(
   const [rememberedOrigin, setRememberedOrigin] = useState(getRememberedStOrigin);
   const [error, setError] = useState<Error | null>(null);
   const [operation, setOperation] = useState<StOperation>(null);
+  const [liveBridge, setLiveBridge] = useState<StLiveBridgeStatus | null>(null);
+  const [liveBridgeError, setLiveBridgeError] = useState<Error | null>(null);
+  const [liveBridgeOperation, setLiveBridgeOperation] = useState<StLiveBridgeOperation>(null);
   const [isRefreshingSession, setIsRefreshingSession] = useState(false);
   const [isPageVisible, setIsPageVisible] = useState(
     () => typeof document === "undefined" || document.visibilityState === "visible",
@@ -128,9 +145,11 @@ export function useStConnection(
   const sessionRequestRef = useRef<Promise<StSession | null> | null>(null);
   const catalogRequestRef = useRef<Promise<StPresetCatalog> | null>(null);
   const heartbeatRequestRef = useRef<Promise<StSession> | null>(null);
+  const liveBridgeRequestRef = useRef<Promise<StLiveBridgeStatus> | null>(null);
   const sessionAbortRef = useRef<AbortController | null>(null);
   const catalogAbortRef = useRef<AbortController | null>(null);
   const heartbeatAbortRef = useRef<AbortController | null>(null);
+  const liveBridgeAbortRef = useRef<AbortController | null>(null);
   const mutationAbortRef = useRef<AbortController | null>(null);
   const pushAbortRef = useRef<AbortController | null>(null);
   const retryCountRef = useRef(0);
@@ -148,6 +167,7 @@ export function useStConnection(
       sessionAbortRef.current?.abort();
       catalogAbortRef.current?.abort();
       heartbeatAbortRef.current?.abort();
+      liveBridgeAbortRef.current?.abort();
       mutationAbortRef.current?.abort();
       pushAbortRef.current?.abort();
     };
@@ -162,9 +182,18 @@ export function useStConnection(
 
   const applySession = useCallback((nextSession: StSession | null) => {
     sessionRef.current = nextSession;
+    if (nextSession?.status !== "connected") {
+      liveBridgeAbortRef.current?.abort();
+      liveBridgeRequestRef.current = null;
+    }
     if (mountedRef.current) {
       setSession((current) => (sameSession(current, nextSession) ? current : nextSession));
-      if (nextSession?.status !== "connected") setCatalog(null);
+      if (nextSession?.status !== "connected") {
+        setCatalog(null);
+        setLiveBridge(null);
+        setLiveBridgeError(null);
+        setLiveBridgeOperation(null);
+      }
     }
   }, []);
 
@@ -173,9 +202,16 @@ export function useStConnection(
     sessionAbortRef.current?.abort();
     catalogAbortRef.current?.abort();
     heartbeatAbortRef.current?.abort();
+    liveBridgeAbortRef.current?.abort();
     sessionRequestRef.current = null;
     catalogRequestRef.current = null;
     heartbeatRequestRef.current = null;
+    liveBridgeRequestRef.current = null;
+    if (mountedRef.current) {
+      setLiveBridge(null);
+      setLiveBridgeError(null);
+      setLiveBridgeOperation(null);
+    }
     return connectionGenerationRef.current;
   }, []);
 
@@ -505,6 +541,104 @@ export function useStConnection(
     [api],
   );
 
+  const checkLiveBridge = useCallback(async () => {
+    if (liveBridgeRequestRef.current) return liveBridgeRequestRef.current;
+    if (sessionRef.current?.status !== "connected") {
+      throw new Error("请先连接 SillyTavern，再检查 Live Bridge。");
+    }
+    liveBridgeAbortRef.current?.abort();
+    const controller = new AbortController();
+    const generation = connectionGenerationRef.current;
+    liveBridgeAbortRef.current = controller;
+    const request = api.getLiveBridgeStatus({ signal: controller.signal });
+    liveBridgeRequestRef.current = request;
+    if (mountedRef.current) {
+      setLiveBridgeOperation("check");
+      setLiveBridgeError(null);
+    }
+    try {
+      const status = await request;
+      if (
+        mountedRef.current
+        && !controller.signal.aborted
+        && generation === connectionGenerationRef.current
+      ) {
+        setLiveBridge(status);
+      }
+      return status;
+    } catch (caught) {
+      if (isAbortError(caught) || generation !== connectionGenerationRef.current) {
+        throw caught;
+      }
+      const nextError = toError(caught);
+      if (mountedRef.current) setLiveBridgeError(nextError);
+      throw nextError;
+    } finally {
+      if (liveBridgeRequestRef.current === request) liveBridgeRequestRef.current = null;
+      if (liveBridgeAbortRef.current === controller) liveBridgeAbortRef.current = null;
+      if (mountedRef.current) {
+        setLiveBridgeOperation((current) => (current === "check" ? null : current));
+      }
+    }
+  }, [api]);
+
+  const mutateLiveBridge = useCallback(async (
+    nextOperation: Exclude<StLiveBridgeOperation, "check" | null>,
+    action: (signal: AbortSignal) => Promise<StLiveBridgeMutationResult>,
+  ) => {
+    if (sessionRef.current?.status !== "connected") {
+      throw new Error("请先连接 SillyTavern，再管理 Live Bridge。");
+    }
+    liveBridgeAbortRef.current?.abort();
+    liveBridgeRequestRef.current = null;
+    const controller = new AbortController();
+    const generation = connectionGenerationRef.current;
+    liveBridgeAbortRef.current = controller;
+    if (mountedRef.current) {
+      setLiveBridgeOperation(nextOperation);
+      setLiveBridgeError(null);
+    }
+    try {
+      const result = await action(controller.signal);
+      if (
+        mountedRef.current
+        && !controller.signal.aborted
+        && generation === connectionGenerationRef.current
+      ) {
+        setLiveBridge(result.liveBridge);
+      }
+      return result;
+    } catch (caught) {
+      if (isAbortError(caught) || generation !== connectionGenerationRef.current) {
+        throw caught;
+      }
+      const nextError = toError(caught);
+      if (mountedRef.current) setLiveBridgeError(nextError);
+      throw nextError;
+    } finally {
+      if (liveBridgeAbortRef.current === controller) liveBridgeAbortRef.current = null;
+      if (mountedRef.current) {
+        setLiveBridgeOperation((current) => (current === nextOperation ? null : current));
+      }
+    }
+  }, []);
+
+  const installLiveBridge = useCallback(
+    () => mutateLiveBridge(
+      "install",
+      (signal) => api.installLiveBridge({ signal }),
+    ),
+    [api, mutateLiveBridge],
+  );
+
+  const updateLiveBridge = useCallback(
+    () => mutateLiveBridge(
+      "update",
+      (signal) => api.updateLiveBridge({ signal }),
+    ),
+    [api, mutateLiveBridge],
+  );
+
   const presets = useMemo(() => catalog?.presets ?? [], [catalog?.presets]);
   const clearError = useCallback(() => setError(null), []);
 
@@ -515,6 +649,9 @@ export function useStConnection(
     rememberedOrigin,
     error,
     operation,
+    liveBridge,
+    liveBridgeError,
+    liveBridgeOperation,
     isPageVisible,
     isRefreshingSession,
     refreshSession,
@@ -525,6 +662,9 @@ export function useStConnection(
     readPreset,
     previewProjectPush,
     commitProjectPush,
+    checkLiveBridge,
+    installLiveBridge,
+    updateLiveBridge,
     clearError,
   };
 }

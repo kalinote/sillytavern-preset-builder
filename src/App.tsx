@@ -714,11 +714,17 @@ export default function App() {
           operation={st.operation}
           isRefreshing={st.isRefreshingSession}
           error={st.error?.message}
+          liveBridge={st.liveBridge}
+          liveBridgeOperation={st.liveBridgeOperation}
+          liveBridgeError={st.liveBridgeError?.message}
           onConnect={st.connectSession}
           onRefresh={st.refreshSession}
           onCheck={st.checkSession}
           onDisconnect={st.disconnectSession}
           onRetryBackend={retryBackend}
+          onCheckLiveBridge={st.checkLiveBridge}
+          onInstallLiveBridge={st.installLiveBridge}
+          onUpdateLiveBridge={st.updateLiveBridge}
         />
 
         {workspace.project && pushDialogOpen ? (

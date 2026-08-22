@@ -687,7 +687,6 @@ export function createApiServer(options: ApiServerOptions = {}): {
       }
       return;
     }
-
     setCommonHeaders(response);
     try {
       authorizeOrigin(request, response, allowedOrigins, forbiddenApiOrigins);
@@ -752,6 +751,39 @@ export function createApiServer(options: ApiServerOptions = {}): {
         sendJson(response, 200, await stSessions.readPreset(cookieValue(request, ST_SESSION_COOKIE), body.name));
         return;
       }
+      if (pathname === "/api/st/live-bridge" && request.method === "GET") {
+        sendJson(response, 200, {
+          liveBridge: await stSessions.getLiveBridgeStatus(cookieValue(request, ST_SESSION_COOKIE)),
+        });
+        return;
+      }
+      if (pathname === "/api/st/live-bridge/install" && request.method === "POST") {
+        const buffer = await readRequestBody(request, 1024);
+        if (buffer.length > 0) {
+          const body = parseJsonBuffer(buffer);
+          if (!isJsonObject(body) || Object.keys(body).length > 0) {
+            throw new ApiError(400, "INVALID_INPUT", "Live Bridge 安装请求体必须为空对象。");
+          }
+        }
+        sendJson(
+          response,
+          200,
+          await stSessions.installLiveBridge(cookieValue(request, ST_SESSION_COOKIE)),
+        );
+        return;
+      }
+      if (pathname === "/api/st/live-bridge/update" && request.method === "POST") {
+        const buffer = await readRequestBody(request, 1024);
+        if (buffer.length > 0) {
+          const body = parseJsonBuffer(buffer);
+          if (!isJsonObject(body) || Object.keys(body).length > 0) {
+            throw new ApiError(400, "INVALID_INPUT", "Live Bridge 更新请求体必须为空对象。");
+          }
+        }
+        sendJson(response, 200, await stSessions.updateLiveBridge(cookieValue(request, ST_SESSION_COOKIE)));
+        return;
+      }
+
       if (pathname === "/api/projects" && request.method === "GET") {
         sendJson(response, 200, { projects: await store.listProjects() });
         return;

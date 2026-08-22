@@ -1,0 +1,12 @@
+{
+  "display_name": "Preset Studio Live Bridge",
+  "loading_order": 200,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "author": "kalinote",
+  "version": "0.1.0",
+  "homePage": "https://github.com/kalinote/SPB-live-bridge",
+  "auto_update": false,
+  "minimum_client_version": "1.18.0"
+}

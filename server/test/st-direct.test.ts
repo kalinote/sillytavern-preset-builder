@@ -20,6 +20,7 @@ interface MockRequestLog {
   authorization?: string;
   cookie?: string;
   csrf?: string;
+  body?: Record<string, unknown>;
 }
 
 function preset(content: string): JsonObject {
@@ -53,6 +54,14 @@ async function createMockSt(options: MockStOptions = {}) {
   let csrfGeneration = 1;
   let rejectNextProtected = false;
   let saveDelayMs = 0;
+  let liveBridgeInstalled = false;
+  let globalLiveBridgeInstalled = false;
+  let liveBridgeRemote = "https://github.com/kalinote/SPB-live-bridge.git";
+  let liveBridgeBranch = "master";
+  let liveBridgeUpToDate = true;
+  let liveBridgeCommit = "1111111111111111111111111111111111111111";
+  let extensionsEnabled = true;
+  let extensionDelayMs = 0;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://mock-st");
     const log: MockRequestLog = {
@@ -131,6 +140,80 @@ async function createMockSt(options: MockStOptions = {}) {
       sendJson(response, 200, { name: body.name });
       return;
     }
+    if (url.pathname.startsWith("/api/extensions/") && !extensionsEnabled) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    if (url.pathname === "/api/extensions/discover" && request.method === "GET") {
+      const entries = liveBridgeInstalled
+        ? [{ type: "local", name: "third-party/SPB-live-bridge" }]
+        : globalLiveBridgeInstalled
+          ? [{ type: "global", name: "third-party/SPB-live-bridge" }]
+          : [];
+      sendJson(response, 200, entries);
+      return;
+    }
+    if (url.pathname === "/api/extensions/install" && request.method === "POST") {
+      const body = await requestJson(request);
+      log.body = body;
+      if (liveBridgeInstalled) {
+        response.writeHead(409);
+        response.end("Directory already exists");
+        return;
+      }
+      if (extensionDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, extensionDelayMs));
+      liveBridgeInstalled = true;
+      liveBridgeRemote = String(body.url ?? "");
+      liveBridgeBranch = String(body.branch ?? "");
+      liveBridgeUpToDate = true;
+      sendJson(response, 200, {
+        version: "0.1.0",
+        author: "kalinote",
+        display_name: "Preset Studio Live Bridge",
+        extensionPath: "C:\\sensitive\\extensions\\SPB-live-bridge",
+        folderName: "SPB-live-bridge",
+      });
+      return;
+    }
+    if (url.pathname === "/api/extensions/version" && request.method === "POST") {
+      const body = await requestJson(request);
+      log.body = body;
+      if (!liveBridgeInstalled) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      if (extensionDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, extensionDelayMs));
+      sendJson(response, 200, {
+        currentBranchName: liveBridgeBranch,
+        currentCommitHash: liveBridgeCommit,
+        isUpToDate: liveBridgeUpToDate,
+        remoteUrl: liveBridgeRemote,
+      });
+      return;
+    }
+    if (url.pathname === "/api/extensions/update" && request.method === "POST") {
+      const body = await requestJson(request);
+      log.body = body;
+      if (!liveBridgeInstalled) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      if (extensionDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, extensionDelayMs));
+      const wasUpToDate = liveBridgeUpToDate;
+      liveBridgeCommit = wasUpToDate
+        ? liveBridgeCommit
+        : "2222222222222222222222222222222222222222";
+      liveBridgeUpToDate = true;
+      sendJson(response, 200, {
+        shortCommitHash: liveBridgeCommit.slice(0, 7),
+        isUpToDate: wasUpToDate,
+        remoteUrl: liveBridgeRemote,
+      });
+      return;
+    }
     response.writeHead(404);
     response.end();
   });
@@ -146,6 +229,13 @@ async function createMockSt(options: MockStOptions = {}) {
     logs,
     rejectNextProtected: () => { rejectNextProtected = true; },
     setSaveDelay: (value: number) => { saveDelayMs = value; },
+    isLiveBridgeInstalled: () => liveBridgeInstalled,
+    setGlobalLiveBridgeInstalled: (value: boolean) => { globalLiveBridgeInstalled = value; },
+    setLiveBridgeRemote: (value: string) => { liveBridgeRemote = value; },
+    setLiveBridgeBranch: (value: string) => { liveBridgeBranch = value; },
+    setLiveBridgeUpToDate: (value: boolean) => { liveBridgeUpToDate = value; },
+    setExtensionsEnabled: (value: boolean) => { extensionsEnabled = value; },
+    setExtensionDelay: (value: number) => { extensionDelayMs = value; },
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }
@@ -261,7 +351,15 @@ test("direct ST session supports cookies, CSRF refresh, catalog/read/create, and
     assert.equal(connectedBody.session.compatibility, "supported");
     assert.equal(connectedBody.session.targetPolicy, "allowlist");
     assert.deepEqual(connectedBody.session.authModes, ["basic", "account"]);
-    assert.deepEqual(connectedBody.session.capabilities, ["preset.list", "preset.read", "preset.save"]);
+    assert.deepEqual(connectedBody.session.capabilities, [
+      "preset.list",
+      "preset.read",
+      "preset.save",
+      "extension.discover",
+      "extension.install",
+      "extension.version",
+      "extension.update",
+    ]);
     assert.equal(connectedBody.session.userHandle, "alice");
     assert.equal(mock.logs.find((entry) => entry.path === "/csrf-token" && entry.authorization)?.authorization,
       `Basic ${Buffer.from("basic-user:basic-secret").toString("base64")}`);
@@ -435,6 +533,168 @@ test("direct ST session supports cookies, CSRF refresh, catalog/read/create, and
     stSessions.close();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (!mockClosed) await mock.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Live Bridge is managed from the fixed local repository with guarded install and update", async () => {
+  const root = await mkdtemp(join(tmpdir(), "preset-studio-live-bridge-"));
+  const mock = await createMockSt();
+  const { server, stSessions } = createApiServer({
+    workspaceRoot: root,
+    staticRoot: false,
+    stSessionOptions: {
+      targetPolicy: "allowlist",
+      allowedOrigins: new Set(),
+      connectTimeoutMs: 1_000,
+      requestTimeoutMs: 100,
+      responseLimitBytes: 4 * 1024 * 1024,
+      sessionIdleMs: 60_000,
+      maxSessions: 2,
+      maxPreviews: 2,
+    },
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const unauthorized = await jsonFetch(baseUrl, "/api/st/live-bridge");
+    assert.equal(unauthorized.status, 401);
+
+    const connected = await jsonFetch(baseUrl, "/api/st/session", {
+      body: { origin: mock.origin },
+    });
+    assert.equal(connected.status, 201);
+    const cookie = cookieFrom(connected);
+    assert.equal(mock.logs.filter((entry) => entry.path.startsWith("/api/extensions/")).length, 0);
+
+    mock.setExtensionsEnabled(false);
+    const unavailable = await jsonFetch(baseUrl, "/api/st/live-bridge", { cookie });
+    assert.equal(unavailable.status, 200);
+    assert.equal((await unavailable.json() as { liveBridge: { state: string } }).liveBridge.state, "unavailable");
+    mock.setExtensionsEnabled(true);
+
+    mock.setGlobalLiveBridgeInstalled(true);
+    const globalOnly = await jsonFetch(baseUrl, "/api/st/live-bridge", { cookie });
+    assert.equal(globalOnly.status, 200);
+    assert.equal((await globalOnly.json() as { liveBridge: { state: string } }).liveBridge.state, "not-installed");
+
+    const missingUpdate = await jsonFetch(baseUrl, "/api/st/live-bridge/update", { cookie, body: {} });
+    assert.equal(missingUpdate.status, 404);
+    assert.equal(
+      (await missingUpdate.json() as { error: { code: string } }).error.code,
+      "ST_LIVE_BRIDGE_NOT_INSTALLED",
+    );
+
+    const installCount = mock.logs.filter((entry) => entry.path === "/api/extensions/install").length;
+    const injectedInstall = await jsonFetch(baseUrl, "/api/st/live-bridge/install", {
+      cookie,
+      body: { url: "https://evil.example/bridge.git", global: true, branch: "evil" },
+    });
+    assert.equal(injectedInstall.status, 400);
+    assert.equal((await injectedInstall.json() as { error: { code: string } }).error.code, "INVALID_INPUT");
+    assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/install").length, installCount);
+
+    // Git-backed extension operations have a controlled timeout longer than the normal ST request timeout.
+    mock.setExtensionDelay(150);
+    const installed = await jsonFetch(baseUrl, "/api/st/live-bridge/install", { cookie, body: {} });
+    assert.equal(installed.status, 200);
+    const installedText = await installed.text();
+    assert.doesNotMatch(installedText, /extensionPath|sensitive/i);
+    const installedBody = JSON.parse(installedText) as {
+      outcome: string;
+      liveBridge: Record<string, unknown>;
+    };
+    assert.equal(installedBody.outcome, "installed");
+    assert.equal(installedBody.liveBridge.state, "installed");
+    assert.equal(installedBody.liveBridge.repositoryUrl, "https://github.com/kalinote/SPB-live-bridge.git");
+    assert.equal(installedBody.liveBridge.scope, "local");
+    assert.equal(installedBody.liveBridge.requiresStReload, true);
+    assert.equal(installedBody.liveBridge.currentBranchName, "master");
+    assert.equal(installedBody.liveBridge.isUpToDate, true);
+    assert.equal(mock.isLiveBridgeInstalled(), true);
+    assert.deepEqual(mock.logs.find((entry) => entry.path === "/api/extensions/install")?.body, {
+      url: "https://github.com/kalinote/SPB-live-bridge.git",
+      global: false,
+      branch: "master",
+    });
+
+    const installedStatus = await jsonFetch(baseUrl, "/api/st/live-bridge", { cookie });
+    assert.equal(installedStatus.status, 200);
+    const installedStatusBody = await installedStatus.json() as {
+      liveBridge: { state: string; requiresStReload: boolean };
+    };
+    assert.equal(installedStatusBody.liveBridge.state, "installed");
+    assert.equal(installedStatusBody.liveBridge.requiresStReload, false);
+
+    mock.setLiveBridgeRemote("https://evil.example/bridge.git?token=secret");
+    const mismatch = await jsonFetch(baseUrl, "/api/st/live-bridge", { cookie });
+    assert.equal(mismatch.status, 200);
+    const mismatchText = await mismatch.text();
+    assert.equal((JSON.parse(mismatchText) as { liveBridge: { state: string } }).liveBridge.state, "source-mismatch");
+    assert.doesNotMatch(mismatchText, /evil\.example|token=secret/);
+    const updateCount = mock.logs.filter((entry) => entry.path === "/api/extensions/update").length;
+    const refusedUpdate = await jsonFetch(baseUrl, "/api/st/live-bridge/update", { cookie, body: {} });
+    assert.equal(refusedUpdate.status, 409);
+    assert.equal(
+      (await refusedUpdate.json() as { error: { code: string } }).error.code,
+      "ST_LIVE_BRIDGE_SOURCE_MISMATCH",
+    );
+    assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/update").length, updateCount);
+
+    mock.setLiveBridgeRemote("https://github.com/kalinote/SPB-live-bridge.git");
+    mock.setLiveBridgeBranch("feature");
+    const branchMismatch = await jsonFetch(baseUrl, "/api/st/live-bridge", { cookie });
+    assert.equal(branchMismatch.status, 200);
+    assert.equal((await branchMismatch.json() as { liveBridge: { state: string } }).liveBridge.state, "source-mismatch");
+    const refusedBranchUpdate = await jsonFetch(baseUrl, "/api/st/live-bridge/update", { cookie, body: {} });
+    assert.equal(refusedBranchUpdate.status, 409);
+    assert.equal((await refusedBranchUpdate.json() as { error: { code: string } }).error.code,
+      "ST_LIVE_BRIDGE_SOURCE_MISMATCH");
+    assert.equal(mock.logs.filter((entry) => entry.path === "/api/extensions/update").length, updateCount);
+    mock.setLiveBridgeBranch("master");
+
+    mock.setLiveBridgeUpToDate(false);
+    const available = await jsonFetch(baseUrl, "/api/st/live-bridge", { cookie });
+    assert.equal(available.status, 200);
+    assert.equal((await available.json() as { liveBridge: { state: string } }).liveBridge.state, "update-available");
+
+    const updated = await jsonFetch(baseUrl, "/api/st/live-bridge/update", { cookie, body: {} });
+    assert.equal(updated.status, 200);
+    const updatedBody = await updated.json() as {
+      outcome: string;
+      liveBridge: Record<string, unknown>;
+    };
+    assert.equal(updatedBody.outcome, "updated");
+    assert.equal(updatedBody.liveBridge.state, "installed");
+    assert.equal(updatedBody.liveBridge.currentCommitHash, "2222222");
+    assert.equal(updatedBody.liveBridge.isUpToDate, true);
+    assert.equal(updatedBody.liveBridge.requiresStReload, true);
+
+    const alreadyCurrent = await jsonFetch(baseUrl, "/api/st/live-bridge/update", { cookie, body: {} });
+    assert.equal(alreadyCurrent.status, 200);
+    const alreadyCurrentBody = await alreadyCurrent.json() as {
+      outcome: string;
+      liveBridge: { requiresStReload: boolean };
+    };
+    assert.equal(alreadyCurrentBody.outcome, "already-up-to-date");
+    assert.equal(alreadyCurrentBody.liveBridge.requiresStReload, false);
+
+    for (const entry of mock.logs.filter((item) => item.path === "/api/extensions/version")) {
+      assert.deepEqual(entry.body, { extensionName: "SPB-live-bridge", global: false });
+    }
+    for (const entry of mock.logs.filter((item) => item.path === "/api/extensions/update")) {
+      assert.deepEqual(entry.body, { extensionName: "SPB-live-bridge", global: false });
+    }
+  } finally {
+    stSessions.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await mock.close();
     await rm(root, { recursive: true, force: true });
   }
 });

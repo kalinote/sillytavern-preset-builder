@@ -18,7 +18,8 @@
     "test:e2e:chromium": "pnpm build && playwright test --project=chromium",
     "test:e2e:strict": "playwright test --config=playwright.strict.config.ts",
     "test:e2e:install": "playwright install chromium firefox webkit",
-    "check": "pnpm build && pnpm test"
+    "check:live-bridge": "node scripts/validate-st-live-bridge.mjs && node --check packages/st-live-bridge/index.js",
+    "check": "pnpm check:live-bridge && pnpm build && pnpm test"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",

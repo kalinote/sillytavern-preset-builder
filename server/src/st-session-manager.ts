@@ -5,6 +5,7 @@ import {
   canonicalPresetRevision,
   SillyTavern118Adapter,
   type StCompatibility,
+  type StExtensionVersionResult,
   type StPresetCatalog,
   type StPresetSnapshot,
   type StVersionInfo,
@@ -13,7 +14,14 @@ import { StHttpClient, type StTargetPolicy } from "./st-http-client.js";
 import type { Diagnostic } from "./types.js";
 
 export const ST_SESSION_COOKIE = "preset_studio_st_session";
-export const ST_CAPABILITIES = ["preset.list", "preset.read", "preset.save"] as const;
+export const ST_CAPABILITIES = [
+  "preset.list", "preset.read", "preset.save",
+  "extension.discover", "extension.install", "extension.version", "extension.update",
+] as const;
+export const ST_LIVE_BRIDGE_REPOSITORY_URL = "https://github.com/kalinote/SPB-live-bridge.git";
+export const ST_LIVE_BRIDGE_EXTENSION_NAME = "SPB-live-bridge";
+export const ST_LIVE_BRIDGE_BRANCH = "master";
+const ST_LIVE_BRIDGE_DISCOVERY_NAME = `third-party/${ST_LIVE_BRIDGE_EXTENSION_NAME}`;
 
 export type StSessionStatus = "connected" | "unreachable" | "expired" | "unsupported";
 export type StAuthMode = "basic" | "account";
@@ -49,6 +57,25 @@ export interface CreateStSessionInput {
   origin: string;
   basicAuth?: { username: string; password: string };
   accountAuth?: { handle: string; password: string };
+}
+
+export type StLiveBridgeState =
+  | "not-installed"
+  | "installed"
+  | "update-available"
+  | "source-mismatch"
+  | "unavailable";
+
+export interface StLiveBridgeStatus {
+  state: StLiveBridgeState;
+  extensionName: typeof ST_LIVE_BRIDGE_EXTENSION_NAME;
+  repositoryUrl: typeof ST_LIVE_BRIDGE_REPOSITORY_URL;
+  scope: "local";
+  requiresStReload: boolean;
+  checkedAt: string;
+  currentBranchName?: string;
+  currentCommitHash?: string;
+  isUpToDate?: boolean;
 }
 
 export interface PushPreviewResult {
@@ -129,6 +156,25 @@ function validatePresetName(value: unknown, field = "presetName"): string {
     throw new ApiError(400, "ST_PRESET_NAME_INVALID", `${field} 包含 SillyTavern 无法安全保存的字符。`);
   }
   return value;
+}
+
+function isTrustedLiveBridgeRemote(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname.toLowerCase() !== "github.com" ||
+      url.port ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) return false;
+    const path = url.pathname.replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
+    return path === "/kalinote/spb-live-bridge";
+  } catch {
+    return false;
+  }
 }
 
 function statusFromVersion(version: StVersionInfo): StSessionStatus {
@@ -287,6 +333,108 @@ export class StSessionManager {
   async readPreset(token: string | undefined, nameValue: unknown): Promise<StPresetSnapshot> {
     const name = validatePresetName(nameValue, "name");
     return this.withUsableSession(token, (record) => record.adapter.readPreset(name));
+  }
+
+  async getLiveBridgeStatus(token: string | undefined): Promise<StLiveBridgeStatus> {
+    return this.withUsableSession(token, (record) => this.inspectLiveBridge(record, false));
+  }
+
+  async installLiveBridge(token: string | undefined): Promise<{
+    liveBridge: StLiveBridgeStatus;
+    outcome: "installed" | "already-installed";
+  }> {
+    const record = this.requireUsableRecord(token);
+    return this.withTargetCommitLock(`${record.origin}\0extension:${ST_LIVE_BRIDGE_EXTENSION_NAME}`, () => (
+      this.runRemote(record, async () => {
+        const current = await this.inspectLiveBridge(record, false);
+        if (current.state === "unavailable") {
+          throw new ApiError(409, "ST_EXTENSIONS_UNAVAILABLE", "SillyTavern 扩展功能未启用或扩展管理接口不可用。");
+        }
+        if (current.state === "source-mismatch") {
+          throw new ApiError(
+            409,
+            "ST_LIVE_BRIDGE_SOURCE_MISMATCH",
+            "同名 SillyTavern 扩展并非来自 Preset Studio 的可信仓库，已拒绝覆盖。",
+          );
+        }
+        if (current.state !== "not-installed") {
+          return { liveBridge: current, outcome: "already-installed" as const };
+        }
+
+        let installed;
+        try {
+          installed = await record.adapter.installExtension(ST_LIVE_BRIDGE_REPOSITORY_URL, ST_LIVE_BRIDGE_BRANCH);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.code !== "ST_EXTENSION_CONFLICT") throw error;
+          const raced = await this.inspectLiveBridge(record, false);
+          if (raced.state === "installed" || raced.state === "update-available") {
+            return { liveBridge: raced, outcome: "already-installed" as const };
+          }
+          throw error;
+        }
+        if (installed.folderName !== ST_LIVE_BRIDGE_EXTENSION_NAME) {
+          throw new ApiError(
+            502,
+            "ST_LIVE_BRIDGE_INSTALL_VERIFY_FAILED",
+            "SillyTavern 安装扩展后返回了不同的目录名称。",
+          );
+        }
+        const liveBridge = await this.inspectLiveBridge(record, true);
+        if (liveBridge.state !== "installed" && liveBridge.state !== "update-available") {
+          throw new ApiError(
+            502,
+            "ST_LIVE_BRIDGE_INSTALL_VERIFY_FAILED",
+            "无法验证 SillyTavern Live Bridge 的安装结果。",
+          );
+        }
+        return { liveBridge, outcome: "installed" as const };
+      })
+    ));
+  }
+
+  async updateLiveBridge(token: string | undefined): Promise<{
+    liveBridge: StLiveBridgeStatus;
+    outcome: "updated" | "already-up-to-date";
+  }> {
+    const record = this.requireUsableRecord(token);
+    return this.withTargetCommitLock(`${record.origin}\0extension:${ST_LIVE_BRIDGE_EXTENSION_NAME}`, () => (
+      this.runRemote(record, async () => {
+        const current = await this.inspectLiveBridge(record, false);
+        if (current.state === "unavailable") {
+          throw new ApiError(409, "ST_EXTENSIONS_UNAVAILABLE", "SillyTavern 扩展功能未启用或扩展管理接口不可用。");
+        }
+        if (current.state === "not-installed") {
+          throw new ApiError(404, "ST_LIVE_BRIDGE_NOT_INSTALLED", "请先安装 SillyTavern Live Bridge。");
+        }
+        if (current.state === "source-mismatch") {
+          throw new ApiError(
+            409,
+            "ST_LIVE_BRIDGE_SOURCE_MISMATCH",
+            "同名 SillyTavern 扩展并非来自 Preset Studio 的可信仓库，已拒绝更新。",
+          );
+        }
+        const updated = await record.adapter.updateExtension(ST_LIVE_BRIDGE_EXTENSION_NAME);
+        if (!isTrustedLiveBridgeRemote(updated.remoteUrl)) {
+          throw new ApiError(
+            502,
+            "ST_LIVE_BRIDGE_UPDATE_VERIFY_FAILED",
+            "SillyTavern 更新扩展后返回了不可信的远端仓库。",
+          );
+        }
+        const changed = !updated.isUpToDate;
+        return {
+          liveBridge: {
+            ...current,
+            state: "installed" as const,
+            currentCommitHash: updated.shortCommitHash,
+            isUpToDate: true,
+            requiresStReload: changed,
+            checkedAt: new Date(this.options.now()).toISOString(),
+          },
+          outcome: changed ? "updated" as const : "already-up-to-date" as const,
+        };
+      })
+    ));
   }
 
   async createProjectFromSt(
@@ -473,6 +621,66 @@ export class StSessionManager {
       });
     });
   }
+  private liveBridgeStatus(
+    state: StLiveBridgeState,
+    requiresStReload: boolean,
+    version?: StExtensionVersionResult,
+  ): StLiveBridgeStatus {
+    return {
+      state,
+      extensionName: ST_LIVE_BRIDGE_EXTENSION_NAME,
+      repositoryUrl: ST_LIVE_BRIDGE_REPOSITORY_URL,
+      scope: "local",
+      requiresStReload,
+      checkedAt: new Date(this.options.now()).toISOString(),
+      ...(version === undefined ? {} : {
+        currentBranchName: version.currentBranchName,
+        currentCommitHash: version.currentCommitHash,
+        isUpToDate: version.isUpToDate,
+      }),
+    };
+  }
+
+  private async inspectLiveBridge(
+    record: StSessionRecord,
+    requiresStReload: boolean,
+  ): Promise<StLiveBridgeStatus> {
+    let extensions;
+    try {
+      extensions = await record.adapter.discoverExtensions();
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "ST_EXTENSIONS_UNAVAILABLE") {
+        return this.liveBridgeStatus("unavailable", false);
+      }
+      throw error;
+    }
+    const installed = extensions.some((extension) => (
+      extension.type === "local" && extension.name === ST_LIVE_BRIDGE_DISCOVERY_NAME
+    ));
+    if (!installed) return this.liveBridgeStatus("not-installed", false);
+
+    let version: StExtensionVersionResult;
+    try {
+      version = await record.adapter.extensionVersion(ST_LIVE_BRIDGE_EXTENSION_NAME);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "ST_EXTENSION_NOT_FOUND") {
+        return this.liveBridgeStatus("not-installed", false);
+      }
+      throw error;
+    }
+    if (
+      !isTrustedLiveBridgeRemote(version.remoteUrl) ||
+      version.currentBranchName !== ST_LIVE_BRIDGE_BRANCH
+    ) {
+      return this.liveBridgeStatus("source-mismatch", false);
+    }
+    return this.liveBridgeStatus(
+      version.isUpToDate ? "installed" : "update-available",
+      requiresStReload,
+      version,
+    );
+  }
+
 
   close(): void {
     clearInterval(this.cleanupTimer);

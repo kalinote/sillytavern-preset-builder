@@ -1,0 +1,81 @@
+name: Publish Live Bridge
+
+on:
+  pull_request:
+    paths:
+      - "packages/st-live-bridge/**"
+      - "scripts/validate-st-live-bridge.mjs"
+      - "package.json"
+      - ".github/workflows/publish-live-bridge.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/st-live-bridge/**"
+      - "scripts/validate-st-live-bridge.mjs"
+      - "package.json"
+      - ".github/workflows/publish-live-bridge.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-spb-live-bridge
+  cancel-in-progress: false
+
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+
+      - name: Validate extension files
+        run: npm run check:live-bridge
+
+      - name: Require publish deploy key
+        if: github.event_name != 'pull_request'
+        env:
+          DEPLOY_KEY: ${{ secrets.SPB_LIVE_BRIDGE_DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::Repository secret SPB_LIVE_BRIDGE_DEPLOY_KEY is required to publish the extension."
+            exit 1
+          fi
+
+      - name: Configure target repository SSH key
+        if: github.event_name != 'pull_request'
+        env:
+          DEPLOY_KEY: ${{ secrets.SPB_LIVE_BRIDGE_DEPLOY_KEY }}
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/spb_live_bridge"
+          chmod 600 "$HOME/.ssh/spb_live_bridge"
+          ssh-keyscan -H github.com >> "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Publish generated extension mirror
+        if: github.event_name != 'pull_request'
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/spb_live_bridge -o IdentitiesOnly=yes
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          git clone git@github.com:kalinote/SPB-live-bridge.git "$RUNNER_TEMP/spb-live-bridge"
+          git -C "$RUNNER_TEMP/spb-live-bridge" checkout -B master
+          rsync -a --delete --exclude .git/ packages/st-live-bridge/ "$RUNNER_TEMP/spb-live-bridge/"
+          cd "$RUNNER_TEMP/spb-live-bridge"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "Published extension is already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Publish ${SOURCE_SHA::7}"
+          git push origin HEAD:master

@@ -81,6 +81,36 @@ export interface StPushResult {
   stUrl: string;
 }
 
+export type StLiveBridgeState =
+  | "not-installed"
+  | "installed"
+  | "update-available"
+  | "source-mismatch"
+  | "unavailable";
+
+export interface StLiveBridgeStatus {
+  state: StLiveBridgeState;
+  extensionName: string;
+  repositoryUrl: string;
+  scope: "local";
+  requiresStReload: boolean;
+  checkedAt: string;
+  currentBranchName?: string;
+  currentCommitHash?: string;
+  isUpToDate?: boolean;
+}
+
+export type StLiveBridgeOutcome =
+  | "installed"
+  | "already-installed"
+  | "updated"
+  | "already-up-to-date";
+
+export interface StLiveBridgeMutationResult {
+  liveBridge: StLiveBridgeStatus;
+  outcome: StLiveBridgeOutcome;
+}
+
 export interface StRequestOptions {
   signal?: AbortSignal;
 }
@@ -108,6 +138,9 @@ export interface StApi {
     previewToken: string,
     options?: StRequestOptions,
   ): Promise<StPushResult>;
+  getLiveBridgeStatus(options?: StRequestOptions): Promise<StLiveBridgeStatus>;
+  installLiveBridge(options?: StRequestOptions): Promise<StLiveBridgeMutationResult>;
+  updateLiveBridge(options?: StRequestOptions): Promise<StLiveBridgeMutationResult>;
 }
 
 export interface StApiClientOptions {
@@ -155,6 +188,9 @@ export const ST_API_ENDPOINTS = {
   checkSession: `${ST_API_ROOT}/session/check`,
   presets: `${ST_API_ROOT}/presets`,
   readPreset: `${ST_API_ROOT}/presets/read`,
+  liveBridge: `${ST_API_ROOT}/live-bridge`,
+  installLiveBridge: `${ST_API_ROOT}/live-bridge/install`,
+  updateLiveBridge: `${ST_API_ROOT}/live-bridge/update`,
   pushPreview: (projectId: string) =>
     `${PROJECT_API_ROOT}/${encodeURIComponent(projectId)}/push-preview`,
   pushPreset: (projectId: string) =>
@@ -252,6 +288,63 @@ function parsePresetSummary(value: unknown): StPresetSummary {
     name: requiredString(value, "name", "preset"),
     revision: requiredString(value, "revision", "preset"),
     size,
+  };
+}
+
+function parseLiveBridgeStatus(value: unknown): StLiveBridgeStatus {
+  const candidate = unwrap(value, "liveBridge");
+  if (!isRecord(candidate)) throw new TypeError("Live Bridge 状态响应必须是对象。");
+  const state = candidate.state;
+  if (
+    state !== "not-installed"
+    && state !== "installed"
+    && state !== "update-available"
+    && state !== "source-mismatch"
+    && state !== "unavailable"
+  ) {
+    throw new TypeError("Live Bridge 状态无效。");
+  }
+  if (candidate.scope !== "local") {
+    throw new TypeError("Live Bridge 安装范围无效。");
+  }
+  if (typeof candidate.requiresStReload !== "boolean") {
+    throw new TypeError("Live Bridge 刷新状态无效。");
+  }
+  if (candidate.isUpToDate !== undefined && typeof candidate.isUpToDate !== "boolean") {
+    throw new TypeError("Live Bridge 更新状态无效。");
+  }
+
+  const currentBranchName = optionalString(candidate.currentBranchName);
+  const currentCommitHash = optionalString(candidate.currentCommitHash);
+  return {
+    state,
+    extensionName: requiredString(candidate, "extensionName", "liveBridge"),
+    repositoryUrl: requiredString(candidate, "repositoryUrl", "liveBridge"),
+    scope: "local",
+    requiresStReload: candidate.requiresStReload,
+    checkedAt: requiredString(candidate, "checkedAt", "liveBridge"),
+    ...(currentBranchName ? { currentBranchName } : {}),
+    ...(currentCommitHash ? { currentCommitHash } : {}),
+    ...(typeof candidate.isUpToDate === "boolean"
+      ? { isUpToDate: candidate.isUpToDate }
+      : {}),
+  };
+}
+
+function parseLiveBridgeMutation(value: unknown): StLiveBridgeMutationResult {
+  if (!isRecord(value)) throw new TypeError("Live Bridge 操作响应必须是对象。");
+  const outcome = value.outcome;
+  if (
+    outcome !== "installed"
+    && outcome !== "already-installed"
+    && outcome !== "updated"
+    && outcome !== "already-up-to-date"
+  ) {
+    throw new TypeError("Live Bridge 操作结果无效。");
+  }
+  return {
+    liveBridge: parseLiveBridgeStatus(value),
+    outcome,
   };
 }
 
@@ -515,6 +608,35 @@ export class StApiClient implements StApi {
       await this.request(ST_API_ENDPOINTS.pushPreset(projectId), {
         method: "POST",
         body: { previewToken },
+        signal: options.signal,
+      }),
+    );
+  }
+
+  async getLiveBridgeStatus(options: StRequestOptions = {}) {
+    return parseLiveBridgeStatus(
+      await this.request(ST_API_ENDPOINTS.liveBridge, {
+        method: "GET",
+        signal: options.signal,
+      }),
+    );
+  }
+
+  async installLiveBridge(options: StRequestOptions = {}) {
+    return parseLiveBridgeMutation(
+      await this.request(ST_API_ENDPOINTS.installLiveBridge, {
+        method: "POST",
+        body: {},
+        signal: options.signal,
+      }),
+    );
+  }
+
+  async updateLiveBridge(options: StRequestOptions = {}) {
+    return parseLiveBridgeMutation(
+      await this.request(ST_API_ENDPOINTS.updateLiveBridge, {
+        method: "POST",
+        body: {},
         signal: options.signal,
       }),
     );
